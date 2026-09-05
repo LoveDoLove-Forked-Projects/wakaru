@@ -908,6 +908,9 @@ fn extract_method_assignment<'a>(
     if has_duplicate_param_names(&fn_expr.function.params) {
         return None;
     }
+    if fn_expr_references_own_name(fn_expr) {
+        return None;
+    }
 
     // Case 1: Foo.prototype.method = function() {}
     if let Expr::Member(obj_member) = lhs.obj.as_ref() {
@@ -1138,7 +1141,9 @@ fn extract_define_property(stmt: &Stmt, ctor_binding: &BindingKey) -> Option<Vec
         class_accessor_descriptor_attributes(obj),
         Some(ClassAccessorDescriptorAttributes::ClassCompatible)
     );
-    if value_fn.is_some_and(|fn_expr| has_duplicate_param_names(&fn_expr.function.params)) {
+    if value_fn.is_some_and(|fn_expr| {
+        has_duplicate_param_names(&fn_expr.function.params) || fn_expr_references_own_name(fn_expr)
+    }) {
         return None;
     }
 
@@ -1151,6 +1156,9 @@ fn extract_define_property(stmt: &Stmt, ctor_binding: &BindingKey) -> Option<Vec
                 let Expr::Fn(fn_expr) = kv.value.as_ref() else {
                     continue;
                 };
+                if fn_expr_references_own_name(fn_expr) {
+                    return None;
+                }
                 (&kv.key, fn_expr.function.as_ref())
             }
             // ObjMethodShorthand runs before UnPrototypeClass in the full
@@ -1357,6 +1365,34 @@ fn build_constructor_from_fn(
         accessibility: None,
         is_optional: false,
     }
+}
+
+/// A class method has no name binding of its own, so converting a named
+/// function expression drops its inner binding. That is only safe when the
+/// body never reads the name: `Foo.prototype.m = function q() { ... q ... }`
+/// (a hand-written self-reference, e.g. `asPromise(q, this, ...)`) must stay
+/// on the prototype or `q` becomes a free identifier.
+fn fn_expr_references_own_name(fn_expr: &FnExpr) -> bool {
+    let Some(ident) = &fn_expr.ident else {
+        return false;
+    };
+    struct OwnNameFinder<'a> {
+        binding: &'a BindingKey,
+        found: bool,
+    }
+    impl Visit for OwnNameFinder<'_> {
+        fn visit_ident(&mut self, id: &Ident) {
+            if binding_key(id) == *self.binding {
+                self.found = true;
+            }
+        }
+    }
+    let mut finder = OwnNameFinder {
+        binding: &binding_key(ident),
+        found: false,
+    };
+    fn_expr.function.visit_with(&mut finder);
+    finder.found
 }
 
 fn build_class_method_from_fn(key: PropName, fn_expr: &FnExpr, is_static: bool) -> ClassMethod {

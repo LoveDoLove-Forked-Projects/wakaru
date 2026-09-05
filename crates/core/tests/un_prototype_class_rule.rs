@@ -1110,3 +1110,107 @@ Child.prototype.run = function() {{ return this.value; }};
         assert_eq_normalized(&apply_resolved(&input), &input);
     }
 }
+
+// ============================================================
+// Named function expressions: the inner name binding
+// ============================================================
+
+#[test]
+fn self_referencing_named_method_expression_stays_on_the_prototype() {
+    // protobufjs shape: the method passes itself to a helper by its own
+    // function-expression name. A class method has no such binding, so
+    // converting it would leave `q` undeclared.
+    let input = r#"
+function Service(rpcImpl) {
+    this.rpcImpl = rpcImpl;
+}
+Service.prototype.rpcCall = function q(method, req, callback) {
+    var self = this;
+    if (!callback) return util.asPromise(q, self, method, req);
+    return self.rpcImpl(method, req, callback);
+};
+Service.prototype.end = function() {
+    this.rpcImpl = null;
+    return this;
+};
+"#;
+    let expected = r#"
+class Service {
+    constructor(rpcImpl){
+        this.rpcImpl = rpcImpl;
+    }
+    end() {
+        this.rpcImpl = null;
+        return this;
+    }
+}
+Service.prototype.rpcCall = function q(method, req, callback) {
+    var self = this;
+    if (!callback) return util.asPromise(q, self, method, req);
+    return self.rpcImpl(method, req, callback);
+};
+"#;
+    assert_eq_normalized(&apply_resolved(input), expected);
+}
+
+#[test]
+fn unreferenced_named_method_expression_converts_and_drops_the_name() {
+    let input = r#"
+function Foo() {}
+Foo.prototype.run = function run() { return 1; };
+Foo.create = function create() { return new Foo(); };
+"#;
+    let expected = r#"
+class Foo {
+    run() { return 1; }
+    static create() { return new Foo(); }
+}
+"#;
+    assert_eq_normalized(&apply_resolved(input), expected);
+}
+
+#[test]
+fn self_referencing_named_descriptor_value_stays_on_the_prototype() {
+    let input = r#"
+function Foo() {}
+Object.defineProperty(Foo.prototype, "again", {
+    value: function q() { return q; },
+    writable: true,
+    configurable: true
+});
+Foo.prototype.run = function() { return 1; };
+"#;
+    let expected = r#"
+class Foo {
+    run() { return 1; }
+}
+Object.defineProperty(Foo.prototype, "again", {
+    value: function q() { return q; },
+    writable: true,
+    configurable: true
+});
+"#;
+    assert_eq_normalized(&apply_resolved(input), expected);
+}
+
+#[test]
+fn self_referencing_named_accessor_callback_stays_on_the_prototype() {
+    let input = r#"
+function Foo() {}
+Object.defineProperty(Foo.prototype, "self", {
+    get: function q() { return q; },
+    configurable: true
+});
+Foo.prototype.run = function() { return 1; };
+"#;
+    let expected = r#"
+class Foo {
+    run() { return 1; }
+}
+Object.defineProperty(Foo.prototype, "self", {
+    get: function q() { return q; },
+    configurable: true
+});
+"#;
+    assert_eq_normalized(&apply_resolved(input), expected);
+}
