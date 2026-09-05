@@ -45,7 +45,29 @@ attempted in order — first match wins:
    bundles from Bun are detected and split by this unpacker.
    Preserved Bun path comments are used only as filename hints for modules
    already found through structural helper patterns; they are not module
-   boundaries by themselves.
+   boundaries by themselves. Bindings that stay in the synthetic entry (a
+   declaration the last-module boundary search leaves in the remainder, or a
+   restored lazy-module namespace object reached through the `import()`
+   lowering `then(() => (init_x(), ns_x))`) are exported from `entry.js` and
+   imported by the scope modules that reference them. The edge is added only
+   where the resulting entry/module cycle provably cannot observe the
+   entry's initializers: every consumer reference sits inside a function or
+   class bound to a top-level name unreachable from eager or unknown-timing
+   references. Reachability propagates through guard dependencies and namespace
+   exports until a fixed point: calling `start` which references `read` exposes
+   `read`'s dependencies too. Recursive groups with no early or unknown root
+   remain deferred. Unclassified references, including adopted support bodies
+   without a profile, count as unknown timing. Alternatively, the owner may
+   be a hoisted function whose transitive references stay within such functions
+   and external imports. A reference whose timing
+   cannot be proven (a callback flowing into an eager expression, an
+   object-literal method or getter at top level, a computed key, an
+   immediately invoked body, a locally called function), an eager read of
+   entry state, or a write keeps the unlinked reference, which `debug
+   validate` reports as `unresolved_reference`; relocating such state is not
+   attempted. The guard analysis does not infer callback scheduling: an eagerly
+   reached function containing a Promise callback can therefore retain an
+   unlinked reference even though that callback runs later at runtime.
 8. **Metro** — React Native/Expo plain-JavaScript bundles made of top-level
    `__d(factory, moduleId, dependencyMap)` definitions and `__r(entryId)`
    startup calls. The extractor resolves indexed dependencies, normalizes the

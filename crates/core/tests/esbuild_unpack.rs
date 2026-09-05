@@ -1,5 +1,5 @@
 use wakaru_core::driver::test_support::{unpack, unpack_raw};
-use wakaru_core::{validate_output_modules, DecompileOptions};
+use wakaru_core::{validate_output_modules, DecompileOptions, OutputFindingKind};
 
 fn expect_unpack(source: &str, filename: &str) -> Vec<(String, String)> {
     let output = unpack(
@@ -3393,4 +3393,451 @@ fn esbuild_function_iife_arguments_binding_fails_closed() {
         "a regular-function IIFE must keep its arguments binding: {pairs:#?}"
     );
     assert!(pairs[0].1.contains("arguments.length"));
+}
+
+const ENTRY_OWNED_BINDINGS_BUNDLE: &str = r#"
+var __defProp = Object.defineProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
+var ns_lazy = {};
+__export(ns_lazy, { value: () => value });
+var value;
+var init_lazy = __esm(() => {
+  value = 42;
+});
+var ns_a = {};
+__export(ns_a, { greet: () => greet, load: () => load });
+function greet() {
+  entryHelper();
+  return "hi";
+}
+function load() {
+  return Promise.resolve().then(() => (init_lazy(), ns_lazy));
+}
+var ns_main = {};
+__export(ns_main, { main: () => main, entryHelper: () => entryHelper });
+import { readFileSync } from "fs";
+function entryHelper() {
+  console.log("helper");
+}
+async function main() {
+  greet();
+  console.log((await load()).value);
+}
+main();
+"#;
+
+#[test]
+fn scope_module_imports_entry_owned_declaration_and_restored_namespace() {
+    // Bun keeps external `import` declarations at their module position, so
+    // the last namespace header is followed by an import and its body stays
+    // in the entry remainder. `greet` (in ns_a) calls that entry-owned
+    // `entryHelper`, and `load` returns the restored lazy namespace object
+    // `ns_lazy` through the `import()` lowering. Both need an edge from the
+    // scope module to the entry.
+    let raw_pairs = expect_unpack_raw(ENTRY_OWNED_BINDINGS_BUNDLE);
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    assert!(
+        ns_a.contains("import { entryHelper, ns_lazy } from \"./entry.js\";"),
+        "ns_a.js should import the entry-owned bindings: {ns_a}"
+    );
+    let entry = &raw_pairs.iter().find(|(n, _)| n == "entry.js").unwrap().1;
+    assert!(
+        entry.contains("export { entryHelper, ns_lazy };"),
+        "entry.js should export the bindings scope modules import: {entry}"
+    );
+    assert!(
+        entry.contains("function entryHelper()"),
+        "entry.js should still own the declaration: {entry}"
+    );
+    assert_eq!(validate_output_modules(&raw_pairs), vec![]);
+
+    let normal_pairs = expect_unpack(ENTRY_OWNED_BINDINGS_BUNDLE, "bundle.js");
+    assert_eq!(validate_output_modules(&normal_pairs), vec![]);
+}
+
+#[test]
+fn scope_module_imports_restored_lazy_namespace_without_entry_remainder() {
+    // Same bundle without the inline import: the last namespace becomes a
+    // regular scope module, so only the lazy namespace object stays in the
+    // entry. With startup left to the importer, the consumer can safely
+    // import it from there: no scope module invokes the exported functions.
+    let bundle = ENTRY_OWNED_BINDINGS_BUNDLE
+        .replace("import { readFileSync } from \"fs\";\n", "")
+        .replace("\nmain();\n", "\n");
+    let raw_pairs = expect_unpack_raw(&bundle);
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    assert!(
+        ns_a.contains("import { ns_lazy } from \"./entry.js\";"),
+        "ns_a.js should import the restored namespace: {ns_a}"
+    );
+    assert!(
+        ns_a.contains("import { entryHelper } from \"./ns_main.js\";"),
+        "entryHelper lives in the ns_main scope module here: {ns_a}"
+    );
+    let entry = &raw_pairs.iter().find(|(n, _)| n == "entry.js").unwrap().1;
+    assert!(
+        entry.contains("export { ns_lazy };"),
+        "entry.js should export the restored namespace: {entry}"
+    );
+    assert_eq!(validate_output_modules(&raw_pairs), vec![]);
+    assert_eq!(
+        validate_output_modules(&expect_unpack(&bundle, "bundle.js")),
+        vec![]
+    );
+}
+
+#[test]
+fn eager_read_of_entry_owned_state_gets_no_entry_import() {
+    // `shared` stays in the entry (a prelude constant no boundary claims) and
+    // ns_a reads it while evaluating. An import edge would make ns_a
+    // evaluate before the entry and read `shared` in its TDZ, so the edge is
+    // withheld; the graph validator reports the reference instead.
+    let bundle = r#"
+var __defProp = Object.defineProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+const shared = 42;
+var ns_a = {};
+__export(ns_a, { value: () => value });
+const value = shared;
+var ns_main = {};
+__export(ns_main, { run: () => run });
+import { readFileSync } from "fs";
+function run() { console.log(value); }
+run();
+"#;
+    let raw_pairs = expect_unpack_raw(bundle);
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    assert!(
+        !ns_a.contains("entry.js"),
+        "eager entry state must not be imported through a cycle: {ns_a}"
+    );
+    let entry = &raw_pairs.iter().find(|(n, _)| n == "entry.js").unwrap().1;
+    assert!(
+        !entry.contains("export { shared }"),
+        "entry should not export state nobody can import safely: {entry}"
+    );
+    let findings = validate_output_modules(&raw_pairs);
+    assert_eq!(
+        findings
+            .iter()
+            .map(|f| (f.kind, f.filename.as_str(), f.message.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(
+            OutputFindingKind::UnresolvedReference,
+            "ns_a.js",
+            "unresolved identifier \"shared\" is declared at module scope only by entry.js, which this module does not import"
+        )]
+    );
+}
+
+#[test]
+fn eager_call_of_entry_owned_function_keeps_the_entry_import() {
+    // Hoisted function declarations are callable before the entry body runs,
+    // so an eager call is safe through the cycle.
+    let bundle = r#"
+var __defProp = Object.defineProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+var ns_a = {};
+__export(ns_a, { value: () => value });
+const value = compute();
+var ns_main = {};
+__export(ns_main, { run: () => run });
+import { readFileSync } from "fs";
+function compute() { return 42; }
+function run() { console.log(value); }
+run();
+"#;
+    let raw_pairs = expect_unpack_raw(bundle);
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    assert!(
+        ns_a.contains("import { compute } from \"./entry.js\";"),
+        "hoisted entry function should be imported: {ns_a}"
+    );
+    assert_eq!(validate_output_modules(&raw_pairs), vec![]);
+}
+
+#[test]
+fn written_entry_owned_state_gets_no_entry_import() {
+    let bundle = r#"
+var __defProp = Object.defineProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+var counter = 0;
+var ns_a = {};
+__export(ns_a, { bump: () => bump });
+function bump() { counter += 1; return counter; }
+var ns_main = {};
+__export(ns_main, { run: () => run });
+import { readFileSync } from "fs";
+function run() { console.log(bump()); }
+run();
+"#;
+    let raw_pairs = expect_unpack_raw(bundle);
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    assert!(
+        !ns_a.contains("import { counter }"),
+        "a written binding cannot be imported: {ns_a}"
+    );
+}
+
+/// Bundle where `shared` (entry state) and `compute` (entry function reading
+/// it) stay in the entry and ns_a reads through `READ`.
+fn entry_state_bundle(read: &str) -> String {
+    format!(
+        r#"
+var __defProp = Object.defineProperty;
+var __export = (target, all) => {{
+  for (var name in all)
+    __defProp(target, name, {{ get: all[name], enumerable: true }});
+}};
+const shared = 42;
+var ns_a = {{}};
+__export(ns_a, {{ value: () => value }});
+const value = {read};
+var ns_main = {{}};
+__export(ns_main, {{ run: () => run }});
+import {{ readFileSync }} from "fs";
+function compute() {{ return shared; }}
+function pure() {{ return 42; }}
+function run() {{ console.log(value); }}
+run();
+"#
+    )
+}
+
+fn ns_a_entry_imports(read: &str) -> Vec<String> {
+    let raw_pairs = expect_unpack_raw(&entry_state_bundle(read));
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    ns_a.lines()
+        .filter(|line| line.contains("./entry.js"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn immediately_invoked_bodies_count_as_eager_entry_reads() {
+    for read in [
+        "(() => shared)()",
+        "(function () { return shared; })()",
+        "(function () { return shared; }).call(null)",
+        "new (function () { this.v = shared; })().v",
+    ] {
+        assert_eq!(ns_a_entry_imports(read), Vec::<String>::new(), "{read}");
+    }
+}
+
+#[test]
+fn computed_keys_count_as_eager_entry_reads() {
+    for read in [
+        "class { [shared]() {} }",
+        "({ get [shared]() { return 1; } })",
+        "({ [shared]() {} })",
+        "class { [shared] = 1; }",
+    ] {
+        assert_eq!(ns_a_entry_imports(read), Vec::<String>::new(), "{read}");
+    }
+    // The member bodies themselves are still deferred.
+    assert_eq!(
+        ns_a_entry_imports("class { m() { return shared; } }"),
+        vec!["import { shared } from \"./entry.js\";".to_string()]
+    );
+}
+
+#[test]
+fn eagerly_called_entry_function_needs_self_contained_references() {
+    // `compute` reads entry state that has not been initialized when ns_a
+    // evaluates; `pure` references nothing outside itself.
+    assert_eq!(ns_a_entry_imports("compute()"), Vec::<String>::new());
+    assert_eq!(
+        ns_a_entry_imports("pure()"),
+        vec!["import { pure } from \"./entry.js\";".to_string()]
+    );
+    // Deferred calls to either are fine.
+    assert_eq!(
+        ns_a_entry_imports("() => compute() + pure()"),
+        vec!["import { compute, pure } from \"./entry.js\";".to_string()]
+    );
+}
+
+#[test]
+fn deferred_reference_needs_a_guard_that_nothing_evaluates_early() {
+    // A local function called while the module evaluates runs its body
+    // early; a getter read on the spot does too. Neither read of `shared` is
+    // provably deferred, so no entry edge is added.
+    let bundle = entry_state_bundle("read()").replace(
+        "const value = read();",
+        "function read() { return shared; }\nconst value = read();",
+    );
+    let raw_pairs = expect_unpack_raw(&bundle);
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    assert!(!ns_a.contains("entry.js"), "{ns_a}");
+    assert_eq!(
+        ns_a_entry_imports("({ get v() { return shared; } }).v"),
+        Vec::<String>::new()
+    );
+    // An unguarded deferred reference (object-literal method at top level)
+    // has unknown timing and is treated the same way.
+    assert_eq!(
+        ns_a_entry_imports("{ m() { return shared; } }"),
+        Vec::<String>::new()
+    );
+    // The same body behind a top-level function nobody evaluates early is
+    // provably deferred.
+    let bundle = entry_state_bundle("null").replace(
+        "const value = null;",
+        "function read() { return shared; }\nconst value = read;",
+    );
+    let raw_pairs = expect_unpack_raw(&bundle);
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    assert!(
+        !ns_a.contains("entry.js"),
+        "aliasing the guard eagerly (`const value = read`) is an eager reference: {ns_a}"
+    );
+    let bundle = entry_state_bundle("null").replace(
+        "const value = null;",
+        "export function read() { return shared; }\nconst value = 1;",
+    );
+    let raw_pairs = expect_unpack_raw(&bundle);
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    assert!(
+        ns_a.contains("import { shared } from \"./entry.js\";"),
+        "{ns_a}"
+    );
+}
+
+#[test]
+fn guard_evaluated_early_by_another_scope_module_blocks_the_edge() {
+    // ns_a's `read` is deferred inside ns_a, but ns_b calls it while ns_b
+    // evaluates, before the entry initializes `shared`.
+    let bundle = r#"
+var __defProp = Object.defineProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+const shared = 42;
+var ns_a = {};
+__export(ns_a, { read: () => read });
+function read() { return shared; }
+var ns_b = {};
+__export(ns_b, { early: () => early });
+const early = read();
+var ns_main = {};
+__export(ns_main, { run: () => run });
+import { readFileSync } from "fs";
+function run() { console.log(early); }
+run();
+"#;
+    let raw_pairs = expect_unpack_raw(bundle);
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    assert!(!ns_a.contains("entry.js"), "{ns_a}");
+}
+
+#[test]
+fn namespace_object_read_early_blocks_the_edge() {
+    // ns_b reads ns_a's namespace object while evaluating; its getters could
+    // hand out `read` and run it before the entry initializes `shared`.
+    let bundle = r#"
+var __defProp = Object.defineProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+const shared = 42;
+var ns_a = {};
+__export(ns_a, { read: () => read });
+function read() { return shared; }
+var ns_b = {};
+__export(ns_b, { early: () => early });
+const early = ns_a.read();
+var ns_main = {};
+__export(ns_main, { run: () => run });
+import { readFileSync } from "fs";
+function run() { console.log(early); }
+run();
+"#;
+    let raw_pairs = expect_unpack_raw(bundle);
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    assert!(!ns_a.contains("entry.js"), "{ns_a}");
+}
+
+#[test]
+fn entry_state_stays_unlinked_through_transitive_guard_calls() {
+    for body in [
+        "function read() { return shared; }\nfunction start() { return read(); }\nconst value = start();",
+        "function read() { return shared; }\nfunction middle() { return read(); }\nfunction start() { return middle(); }\nconst value = start();",
+        "function read() { return shared; }\nfunction start() { return read(); }\nconst value = ({ get v() { return start(); } }).v;",
+    ] {
+        let bundle = entry_state_bundle("null").replace("const value = null;", body);
+        let raw_pairs = expect_unpack_raw(&bundle);
+        let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+        assert!(!ns_a.contains("entry.js"), "{body}\n{ns_a}");
+    }
+}
+
+#[test]
+fn recursive_guards_need_an_early_root_to_block_entry_linkage() {
+    for (initializer, expected_import) in [("first(1)", false), ("0", true)] {
+        let body = format!(
+            "function first(n) {{ return n ? second(n - 1) : 0; }}\n\
+             function second(n) {{ return n ? first(n - 1) : shared; }}\nconst value = {initializer};"
+        );
+        let bundle = entry_state_bundle("null").replace("const value = null;", &body);
+        let raw_pairs = expect_unpack_raw(&bundle);
+        let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+        assert_eq!(
+            ns_a.contains("import { shared } from \"./entry.js\";"),
+            expected_import,
+            "{body}\n{ns_a}"
+        );
+    }
+}
+
+#[test]
+fn namespace_exposure_propagates_through_guard_calls() {
+    let bundle = entry_state_bundle("null")
+        .replace(
+            "__export(ns_a, { value: () => value });",
+            "__export(ns_a, { value: () => value, read: () => read });",
+        )
+        .replace(
+            "const value = null;",
+            "function read() { return shared; }\nfunction start() { return ns_a.read(); }\nconst value = start();",
+        );
+    let raw_pairs = expect_unpack_raw(&bundle);
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    assert!(
+        !ns_a.contains("import { shared }"),
+        "a transitively exposed namespace must expose its guards too: {ns_a}"
+    );
+}
+
+#[test]
+fn early_guard_with_nested_callback_keeps_unproven_namespace_unlinked() {
+    // main now executes in a scope module, reaching load before entry runs.
+    // The Promise callback happens later at runtime, but guard reachability
+    // deliberately does not infer callback scheduling. Keep the unresolved
+    // reference instead of treating a nested callback as a deferral proof.
+    let bundle = ENTRY_OWNED_BINDINGS_BUNDLE.replace("import { readFileSync } from \"fs\";\n", "");
+    let raw_pairs = expect_unpack_raw(&bundle);
+    let ns_a = &raw_pairs.iter().find(|(n, _)| n == "ns_a.js").unwrap().1;
+    assert!(!ns_a.contains("import { ns_lazy }"), "{ns_a}");
+    let findings = validate_output_modules(&raw_pairs);
+    assert!(findings.iter().any(|finding| {
+        finding.kind == OutputFindingKind::UnresolvedReference
+            && finding.filename == "ns_a.js"
+            && finding.message.contains("ns_lazy")
+    }));
 }

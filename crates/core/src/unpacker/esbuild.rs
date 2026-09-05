@@ -24,6 +24,7 @@ use crate::unpacker::{
     module_item_declared_binding_ids, span_byte_range, spans_byte_ranges, BindingId, BundleFormat,
     UnpackResult, UnpackedModule,
 };
+use crate::utils::paren::strip_parens;
 
 pub(super) fn detect_from_module_with_source(
     module: &Module,
@@ -2836,6 +2837,11 @@ struct ScopeBindingMaps {
 struct ScopeImportExportMaps {
     remaining_indices: Vec<usize>,
     entry_referenced: HashSet<BindingId>,
+    /// Bindings that stay in the synthetic entry (remaining declarations and
+    /// restorable namespace objects) but are referenced by a scope module.
+    /// Each needs an `import ... from "./entry.js"` in the consumer and an
+    /// `export` from the entry.
+    scope_needed_entry_bindings: HashSet<BindingId>,
     effective_exports: Vec<HashSet<Atom>>,
     binding_to_filename: HashMap<BindingId, String>,
     scope_claimed_factory_bindings: HashMap<BindingId, String>,
@@ -2878,7 +2884,7 @@ fn extract_scope_hoisted_modules(
     // complete write inventory and rebuild the module index.
     merge_conflicting_factory_scope_metas(&mut partition.metas, &maps.factory_preassigned_by_atom);
     maps.binding_to_module = scope_binding_to_module(&partition.metas);
-    let ie = compute_scope_imports_exports(&metadata, &partition, &maps, &refs);
+    let ie = compute_scope_imports_exports(analysis_items, &metadata, &partition, &maps, &refs);
     let emitted = emit_scope_modules(
         cm,
         &metadata,
@@ -3334,7 +3340,284 @@ fn adopt_scope_support_decls(
     owned_support_source_items
 }
 
+/// Collect bindings read while a module body evaluates: everything outside
+/// function, arrow, method, accessor, and class-instance-member bodies.
+/// Computed member keys, static class members, `extends` clauses, and the
+/// bodies of immediately invoked function/arrow expressions (direct call,
+/// `new`, `.call`/`.apply`) evaluate with the enclosing statement and
+/// therefore count as eager. A deferred body that some other module invokes
+/// synchronously before the entry evaluates is not tracked.
+struct EagerRefCollector {
+    references: HashSet<BindingId>,
+}
+
+impl EagerRefCollector {
+    /// Visit the body of a function/arrow expression that runs immediately.
+    fn visit_invoked_callee(&mut self, callee: &Expr) -> bool {
+        match strip_parens(callee) {
+            Expr::Arrow(arrow) => {
+                arrow.params.visit_with(self);
+                arrow.body.visit_with(self);
+                true
+            }
+            Expr::Fn(fn_expr) => {
+                fn_expr.function.params.visit_with(self);
+                fn_expr.function.body.visit_with(self);
+                true
+            }
+            Expr::Member(member) => {
+                let is_call_or_apply = matches!(
+                    &member.prop,
+                    MemberProp::Ident(name) if matches!(name.sym.as_ref(), "call" | "apply")
+                );
+                is_call_or_apply && self.visit_invoked_callee(&member.obj)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Visit for EagerRefCollector {
+    fn visit_ident(&mut self, ident: &Ident) {
+        self.references.insert((ident.sym.clone(), ident.ctxt));
+    }
+
+    fn visit_function(&mut self, _: &Function) {}
+
+    fn visit_arrow_expr(&mut self, _: &ArrowExpr) {}
+
+    // `export { f }` names a binding without evaluating it.
+    fn visit_export_specifier(&mut self, _: &ExportSpecifier) {}
+
+    fn visit_call_expr(&mut self, call: &CallExpr) {
+        if let Callee::Expr(callee) = &call.callee {
+            if !self.visit_invoked_callee(callee) {
+                callee.visit_with(self);
+            }
+        }
+        call.args.visit_with(self);
+    }
+
+    fn visit_new_expr(&mut self, new_expr: &swc_core::ecma::ast::NewExpr) {
+        if !self.visit_invoked_callee(&new_expr.callee) {
+            new_expr.callee.visit_with(self);
+        }
+        new_expr.args.visit_with(self);
+    }
+
+    fn visit_getter_prop(&mut self, prop: &swc_core::ecma::ast::GetterProp) {
+        prop.key.visit_with(self);
+    }
+
+    fn visit_setter_prop(&mut self, prop: &swc_core::ecma::ast::SetterProp) {
+        prop.key.visit_with(self);
+    }
+
+    fn visit_class_member(&mut self, member: &swc_core::ecma::ast::ClassMember) {
+        use swc_core::ecma::ast::ClassMember;
+        match member {
+            ClassMember::StaticBlock(_) => member.visit_children_with(self),
+            ClassMember::ClassProp(prop) if prop.is_static => member.visit_children_with(self),
+            ClassMember::PrivateProp(prop) if prop.is_static => member.visit_children_with(self),
+            // Instance members defer their bodies and initializers, but a
+            // computed key is evaluated while the class is defined.
+            ClassMember::Method(method) => method.key.visit_with(self),
+            ClassMember::ClassProp(prop) => prop.key.visit_with(self),
+            ClassMember::AutoAccessor(accessor) => accessor.key.visit_with(self),
+            _ => {}
+        }
+    }
+}
+
+/// How a scope module's body reaches each top-level binding it references.
+///
+/// `eager`: read while the module evaluates (see [`EagerRefCollector`]).
+/// `guards`: every other reference sits inside a function or class that is
+/// the whole initializer of a top-level binding (`function f`, `class C`,
+/// `const f = () => ...`); the guard is that binding. Such a body can only
+/// run through its guard. Deferral requires that guard to be unreachable from
+/// eager or unknown-timing references, including transitive guard references.
+/// `unprovable`: a deferred reference with no such guard (a function
+/// expression flowing into an eager expression, an object-literal method or
+/// getter at top level, a multi-declarator statement, ...). Its timing is not
+/// known, so it is treated as unsafe.
+struct ScopeEvaluationProfile {
+    eager: HashSet<BindingId>,
+    guards: HashMap<BindingId, HashSet<BindingId>>,
+    unprovable: HashSet<BindingId>,
+}
+
+fn scope_evaluation_profile(
+    meta: &ScopeModuleMeta,
+    analysis_items: &[ModuleItem],
+    item_infos: &[ItemBindingInfo],
+) -> ScopeEvaluationProfile {
+    let mut profile = ScopeEvaluationProfile {
+        eager: HashSet::new(),
+        guards: HashMap::new(),
+        unprovable: HashSet::new(),
+    };
+    for &i in &meta.body_indices {
+        let item = &analysis_items[i];
+        let mut eager = EagerRefCollector {
+            references: HashSet::new(),
+        };
+        item.visit_with(&mut eager);
+        let guard = item_guard_binding(item);
+        for reference in &item_infos[i].references {
+            if eager.references.contains(reference) {
+                profile.eager.insert(reference.clone());
+            } else if let Some(guard) = &guard {
+                profile
+                    .guards
+                    .entry(reference.clone())
+                    .or_default()
+                    .insert(guard.clone());
+            } else {
+                profile.unprovable.insert(reference.clone());
+            }
+        }
+    }
+    profile
+}
+
+/// The top-level binding whose function or class body owns every deferred
+/// reference in `item`, when the item is exactly one such declaration.
+fn item_guard_binding(item: &ModuleItem) -> Option<BindingId> {
+    let decl = match item {
+        ModuleItem::Stmt(Stmt::Decl(decl)) => decl,
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => &export.decl,
+        _ => return None,
+    };
+    match decl {
+        Decl::Fn(function) => Some((function.ident.sym.clone(), function.ident.ctxt)),
+        Decl::Class(class) => Some((class.ident.sym.clone(), class.ident.ctxt)),
+        Decl::Var(var) => {
+            let [declarator] = var.decls.as_slice() else {
+                return None;
+            };
+            let Pat::Ident(binding) = &declarator.name else {
+                return None;
+            };
+            let init = strip_parens(declarator.init.as_deref()?);
+            matches!(init, Expr::Fn(_) | Expr::Arrow(_) | Expr::Class(_))
+                .then(|| (binding.id.sym.clone(), binding.id.ctxt))
+        }
+        _ => None,
+    }
+}
+
+/// Conservative reachability, not a call graph: touching a guard exposes all
+/// references in its body, whether it is called, aliased, or passed elsewhere.
+/// Unknown timing is also a root. Namespace exposure makes its exports reachable.
+/// A worklist reaches a fixed point even for mutually recursive guards; a cycle
+/// with no early/unknown root remains deferred.
+fn early_scope_references(
+    metas: &[ScopeModuleMeta],
+    profiles: &[ScopeEvaluationProfile],
+) -> HashSet<BindingId> {
+    let mut dependents: HashMap<BindingId, HashSet<BindingId>> = HashMap::new();
+    let mut pending = Vec::new();
+    for (meta, profile) in metas.iter().zip(profiles) {
+        pending.extend(profile.eager.iter().cloned());
+        pending.extend(profile.unprovable.iter().cloned());
+        // Adopted support declarations may not have a body-index profile.
+        // Missing classification cannot certify one of their callees as deferred.
+        pending.extend(
+            meta.referenced_bindings
+                .iter()
+                .filter(|reference| {
+                    !profile.eager.contains(*reference)
+                        && !profile.guards.contains_key(*reference)
+                        && !profile.unprovable.contains(*reference)
+                })
+                .cloned(),
+        );
+        for (reference, guards) in &profile.guards {
+            for guard in guards {
+                dependents
+                    .entry(guard.clone())
+                    .or_default()
+                    .insert(reference.clone());
+            }
+        }
+        for namespace in &meta.namespaces {
+            dependents
+                .entry(namespace.namespace_binding.clone())
+                .or_default()
+                .extend(meta.exported_bindings.iter().cloned());
+        }
+    }
+    let mut reachable = HashSet::new();
+    while let Some(binding) = pending.pop() {
+        if reachable.insert(binding.clone()) {
+            if let Some(references) = dependents.get(&binding) {
+                pending.extend(references.iter().cloned());
+            }
+        }
+    }
+    reachable
+}
+
+/// Entry-owned hoisted function declarations that a scope module may call
+/// while evaluating: the transitive top-level references of the function
+/// stay within other such functions and the entry's own external imports.
+/// Anything else (entry state, factory state, scope-module bindings) could be
+/// read before it is initialized, so the function is not callable early.
+fn self_contained_entry_functions(
+    remaining_indices: &[usize],
+    analysis_items: &[ModuleItem],
+    item_infos: &[ItemBindingInfo],
+    external_imports: &HashMap<BindingId, ExternalImport>,
+) -> HashSet<BindingId> {
+    let function_items: HashMap<&BindingId, usize> = remaining_indices
+        .iter()
+        .filter(|&&i| {
+            matches!(
+                &analysis_items[i],
+                ModuleItem::Stmt(Stmt::Decl(Decl::Fn(_)))
+                    | ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
+                        decl: Decl::Fn(_),
+                        ..
+                    }))
+            )
+        })
+        .flat_map(|&i| {
+            item_infos[i]
+                .declared
+                .iter()
+                .map(move |binding| (binding, i))
+        })
+        .collect();
+
+    // Start from every hoisted function and drop any whose references
+    // escape the set until nothing changes.
+    let mut safe: HashSet<BindingId> = function_items.keys().map(|b| (*b).clone()).collect();
+    loop {
+        let escaping: Vec<BindingId> = safe
+            .iter()
+            .filter(|binding| {
+                let item = function_items[*binding];
+                !item_infos[item].references.iter().all(|reference| {
+                    reference == *binding
+                        || safe.contains(reference)
+                        || external_imports.contains_key(reference)
+                })
+            })
+            .cloned()
+            .collect();
+        if escaping.is_empty() {
+            break;
+        }
+        for binding in escaping {
+            safe.remove(&binding);
+        }
+    }
+    safe
+}
+
 fn compute_scope_imports_exports(
+    analysis_items: &[ModuleItem],
     metadata: &ScopeMetadata,
     partition: &ScopePartition<'_>,
     maps: &ScopeBindingMaps,
@@ -3497,9 +3780,99 @@ fn compute_scope_imports_exports(
         }
     }
 
+    // Scope modules can reference bindings that never leave the entry: a
+    // declaration the last-module boundary search left in the remainder, or
+    // the restored namespace object of a lazy module (the `import()`
+    // lowering `then(() => (init_x(), ns_x))`). Neither is in
+    // `binding_to_module`, so without this edge the consumer keeps a free
+    // identifier. Record them so the consumer imports from the entry and the
+    // entry exports them.
+    //
+    // The edge creates an entry <-> module import cycle in which the module
+    // evaluates first, so it is only added where evaluation order provably
+    // cannot observe the entry's initializers (see `ScopeEvaluationProfile`):
+    // every scope-module use sits in a function or class bound to a top-level
+    // name unreachable through early or unknown-timing guard references, or
+    // the owner is a hoisted function whose transitive references stay within
+    // such functions and external imports. Not being found by the eager collector is not a
+    // proof of deferral; a reference whose timing cannot be proven, an eager
+    // read of entry state, or a write keeps its previous unlinked shape and
+    // the output validator reports it as unresolved.
+    let entry_declared: HashSet<&BindingId> = remaining_indices
+        .iter()
+        .flat_map(|&i| item_infos[i].declared.iter())
+        .collect();
+    let early_callable_functions = self_contained_entry_functions(
+        &remaining_indices,
+        analysis_items,
+        item_infos,
+        &metadata.external_imports,
+    );
+    let consumed_namespace_bindings: HashSet<&BindingId> = consumed_ns
+        .iter()
+        .map(|(_, _, boundary)| &boundary.ns_binding)
+        .collect();
+    let profiles: Vec<ScopeEvaluationProfile> = metas
+        .iter()
+        .map(|meta| scope_evaluation_profile(meta, analysis_items, item_infos))
+        .collect();
+    let early_references = early_scope_references(metas, &profiles);
+    let mut scope_needed_entry_bindings: HashSet<BindingId> = HashSet::new();
+    let mut unsafe_entry_bindings: HashSet<BindingId> = HashSet::new();
+    for (meta, profile) in metas.iter().zip(&profiles) {
+        let namespace_read_early = meta
+            .namespaces
+            .iter()
+            .any(|namespace| early_references.contains(&namespace.namespace_binding));
+        for binding in meta
+            .referenced_bindings
+            .iter()
+            .chain(meta.exported_bindings.iter())
+        {
+            // Factory-owned state and support declarations are relocated
+            // out of the entry later; they already have an owner filename.
+            if meta.declared_bindings.contains(binding)
+                || binding_to_module.contains_key(binding)
+                || factory_preassigned_bindings.contains_key(binding)
+                || factory_importable_bindings.contains_key(binding)
+            {
+                continue;
+            }
+            if !(entry_declared.contains(binding) || consumed_namespace_bindings.contains(binding))
+            {
+                continue;
+            }
+            let safe = if meta.written_atoms.contains(&binding.0) {
+                false
+            } else if profile.eager.contains(binding) {
+                early_callable_functions.contains(binding)
+            } else if profile.unprovable.contains(binding) || namespace_read_early {
+                false
+            } else {
+                profile.guards.get(binding).is_some_and(|guards| {
+                    guards.iter().all(|guard| !early_references.contains(guard))
+                })
+            };
+            if safe {
+                scope_needed_entry_bindings.insert(binding.clone());
+            } else {
+                unsafe_entry_bindings.insert(binding.clone());
+            }
+        }
+    }
+    for binding in &unsafe_entry_bindings {
+        scope_needed_entry_bindings.remove(binding);
+    }
+    for binding in &scope_needed_entry_bindings {
+        binding_to_filename
+            .entry(binding.clone())
+            .or_insert_with(|| "entry.js".to_string());
+    }
+
     ScopeImportExportMaps {
         remaining_indices,
         entry_referenced,
+        scope_needed_entry_bindings,
         effective_exports,
         binding_to_filename,
         scope_claimed_factory_bindings,
@@ -3537,6 +3910,7 @@ fn emit_scope_modules(
         binding_filename_by_atom,
         filename_to_module,
         binding_module_by_atom,
+        scope_needed_entry_bindings,
         ..
     } = ie;
     let factory_preassigned_bindings = refs.factory_preassigned_bindings;
@@ -3590,6 +3964,11 @@ fn emit_scope_modules(
                         .or_default()
                         .push(ref_binding.clone());
                 }
+            } else if scope_needed_entry_bindings.contains(ref_binding) {
+                imports_by_filename
+                    .entry("entry.js".to_string())
+                    .or_default()
+                    .push(ref_binding.clone());
             } else if external_imports.contains_key(ref_binding)
                 && !meta.local_import_bindings.contains(ref_binding)
             {
@@ -3687,6 +4066,11 @@ fn emit_scope_modules(
                         .or_default()
                         .push(export_binding.clone());
                 }
+            } else if scope_needed_entry_bindings.contains(export_binding) {
+                imports_by_filename
+                    .entry("entry.js".to_string())
+                    .or_default()
+                    .push(export_binding.clone());
             } else if external_imports.contains_key(export_binding)
                 && !meta.local_import_bindings.contains(export_binding)
             {
@@ -3903,6 +4287,7 @@ fn build_scope_entry(
     let ScopeImportExportMaps {
         remaining_indices,
         entry_referenced,
+        scope_needed_entry_bindings,
         binding_module_by_atom,
         binding_to_filename,
         ..
@@ -3929,14 +4314,20 @@ fn build_scope_entry(
     }
 
     // Collect atoms that the remaining entry items already export via ESM
-    // `export { ... }` declarations.  Used below to avoid synthesizing
-    // duplicate exports for namespace bindings.
+    // `export { ... }` or `export <decl>` declarations.  Used below to avoid
+    // synthesizing duplicate exports for namespace and entry-owned bindings.
     // Only count unaliased exports: `export { ns_a }` makes `ns_a`
     // importable by name, but `export { ns_a as math }` does not —
     // consumers would need `import { math }`, not `import { ns_a }`.
     let entry_already_exports: HashSet<Atom> = remaining_indices
         .iter()
         .flat_map(|&i| match source_slots[i].as_ref().unwrap() {
+            item @ ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(_)) => {
+                module_item_declared_binding_ids(item)
+                    .into_iter()
+                    .map(|(atom, _)| atom)
+                    .collect::<Vec<_>>()
+            }
             ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(named)) => named
                 .specifiers
                 .iter()
@@ -3970,12 +4361,13 @@ fn build_scope_entry(
     // importing the individual bindings ensures the __export getters
     // resolve correctly.
     let mut restored_items: Vec<ModuleItem> = Vec::new();
-    let mut factory_ns_exports: Vec<Atom> = Vec::new();
+    let mut synthesized_entry_exports: Vec<Atom> = Vec::new();
     let mut restored_namespace_bindings: HashSet<BindingId> = HashSet::new();
     for &(ns_idx, call_idx, boundary) in consumed_ns.iter() {
         let entry_needs = entry_referenced.contains(&boundary.ns_binding);
         let factory_needs = factory_referenced.contains(&boundary.ns_binding);
-        if !entry_needs && !factory_needs {
+        let scope_module_needs = scope_needed_entry_bindings.contains(&boundary.ns_binding);
+        if !entry_needs && !factory_needs && !scope_module_needs {
             continue;
         }
         restored_namespace_bindings.insert(boundary.ns_binding.clone());
@@ -3997,19 +4389,31 @@ fn build_scope_entry(
             &boundary.ns_binding.0,
             &boundary.export_entries,
         ));
-        // If a factory references this namespace but the entry doesn't
-        // already export it via an ESM export declaration, synthesize one
-        // so the factory's `import { ns_a } from "./entry.js"` resolves.
-        if factory_needs && !entry_already_exports.contains(&boundary.ns_binding.0) {
-            factory_ns_exports.push(boundary.ns_binding.0.clone());
+        // If a factory or scope module references this namespace but the
+        // entry doesn't already export it via an ESM export declaration,
+        // synthesize one so `import { ns_a } from "./entry.js"` resolves.
+        if (factory_needs || scope_module_needs)
+            && !entry_already_exports.contains(&boundary.ns_binding.0)
+        {
+            synthesized_entry_exports.push(boundary.ns_binding.0.clone());
+        }
+    }
+    // Remaining entry declarations that scope modules import from the entry.
+    for (atom, _) in scope_needed_entry_bindings
+        .iter()
+        .filter(|binding| !restored_namespace_bindings.contains(*binding))
+    {
+        if !entry_already_exports.contains(atom) {
+            synthesized_entry_exports.push(atom.clone());
         }
     }
     for index in removable_export_helper_indices.iter() {
         let _ = source_slots[*index].take();
     }
-    if !factory_ns_exports.is_empty() {
-        factory_ns_exports.sort();
-        restored_items.push(make_named_export_stmt(&factory_ns_exports));
+    if !synthesized_entry_exports.is_empty() {
+        synthesized_entry_exports.sort();
+        synthesized_entry_exports.dedup();
+        restored_items.push(make_named_export_stmt(&synthesized_entry_exports));
     }
     let mut entry_imports: HashMap<usize, Vec<BindingId>> = HashMap::new();
     for ref_binding in entry_referenced.iter() {
