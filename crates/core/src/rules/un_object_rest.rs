@@ -1716,6 +1716,12 @@ impl VisitMut for ObjectRestProcessor<'_> {
         let mut exclusion_arrays = self.exclusion_arrays.clone();
 
         for (index, stmt) in stmts.iter().enumerate() {
+            if let Some(return_stmt) =
+                self.rewrite_returned_rest(stmt, &mut new_stmts, &exclusion_arrays)
+            {
+                new_stmts.push(return_stmt);
+                continue;
+            }
             let extraction = try_extract_owp_iife(stmt, &exclusion_arrays).or_else(|| {
                 try_extract_owp_named_call(
                     stmt,
@@ -1829,6 +1835,89 @@ impl VisitMut for ObjectRestProcessor<'_> {
 }
 
 impl ObjectRestProcessor<'_> {
+    fn rewrite_returned_rest(
+        &self,
+        stmt: &Stmt,
+        preceding: &mut Vec<Stmt>,
+        exclusion_arrays: &HashMap<BindingKey, Vec<Atom>>,
+    ) -> Option<Stmt> {
+        let Stmt::Return(ret) = stmt else { return None };
+        let (source, keys) = extract_named_owp_args(
+            ret.arg.as_deref()?,
+            self.named_helpers,
+            self.local_helpers,
+            self.swc_numeric_helper_namespaces,
+            self.cross_module_namespaces,
+            exclusion_arrays,
+        )?;
+        let Expr::Ident(source_id) = source.as_ref() else {
+            return None;
+        };
+        if keys.is_empty() || keys.iter().collect::<HashSet<_>>().len() != keys.len() {
+            return None;
+        }
+        // Terser leaves the inlined result's hoisted var declaration behind.
+        // Keep it, and require the complete ordered getter sequence before it.
+        let mut end = preceding.len();
+        while end > 0
+            && matches!(&preceding[end - 1],
+            Stmt::Decl(Decl::Var(var)) if var.kind == VarDeclKind::Var
+                && var.decls.iter().all(|decl| decl.init.is_none() && matches!(decl.name, Pat::Ident(_))))
+        {
+            end -= 1;
+        }
+        let start = end.checked_sub(keys.len())?;
+        let mut accesses = Vec::new();
+        for (stmt, key) in preceding[start..end].iter().zip(&keys) {
+            let Stmt::Decl(Decl::Var(var)) = stmt else {
+                return None;
+            };
+            if var.kind != VarDeclKind::Var || var.decls.len() != 1 {
+                return None;
+            }
+            let decl = &var.decls[0];
+            let Pat::Ident(binding) = &decl.name else {
+                return None;
+            };
+            let Expr::Member(member) = decl.init.as_deref()? else {
+                return None;
+            };
+            if !matches!(member.obj.as_ref(), Expr::Ident(id) if binding_key(id) == binding_key(source_id))
+                || !member_prop_name(&member.prop, key)
+            {
+                return None;
+            }
+            accesses.push(PrecedingAccess::PropAccess {
+                prop: key.clone(),
+                binding: binding.id.sym.clone(),
+                ctxt: binding.id.ctxt,
+            });
+        }
+        let scope_names = collect_scope_names(preceding);
+        let conflicts = AliasNameConflicts {
+            scope_names: &scope_names,
+            reserved_names: self.reserved_names,
+        };
+        let name = find_non_conflicting_alias("rest", conflicts, &HashSet::new());
+        let binding = BindingIdent {
+            id: Ident::new_no_ctxt(name, ret.span),
+            type_ann: None,
+        };
+        let pattern = build_rest_destructuring(
+            ret.span,
+            VarDeclKind::Var,
+            &binding,
+            &source,
+            &keys,
+            &accesses,
+            conflicts,
+        );
+        preceding.splice(start..end, [pattern]);
+        let mut ret = ret.clone();
+        ret.arg = Some(Box::new(Expr::Ident(binding.id)));
+        Some(Stmt::Return(ret))
+    }
+
     fn is_named_helper(&self, ident: &Ident) -> bool {
         self.named_helpers
             .contains_key(&(ident.sym.clone(), ident.ctxt))

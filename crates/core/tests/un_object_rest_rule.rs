@@ -1882,3 +1882,51 @@ fn direct_tslib_rest_preserves_shadowing_and_dynamic_lookup() {
         assert_eq_normalized(&render_rule(input, UnObjectRest::new), input);
     }
 }
+
+#[test]
+fn compressed_returned_rest_recovers_the_complete_pattern() {
+    let input = r#"
+var ts = require("tslib");
+function rest(obj) {
+    var x = obj.x;
+    var tail;
+    return ts.__rest(obj, ["x"]);
+}
+"#;
+    let output = render_rule(input, UnObjectRest::new);
+    assert!(output.contains("...rest_1"), "{output}");
+    assert!(!output.contains(".__rest("), "{output}");
+    let compressed =
+        "var ts=require('tslib');function rest(obj){var x=obj.x,tail;return ts.__rest(obj,['x'])}";
+    assert!(!render(compressed).contains(".__rest("));
+}
+
+#[test]
+fn returned_rest_requires_all_preceding_reads() {
+    for body in [
+        "return ts.__rest(obj, ['x']);",
+        "var x = obj.x; effect(); return ts.__rest(obj, ['x']);",
+        "var x = obj.x; return ts.__rest(obj, ['x', 'y']);",
+        "var x = obj.x; var y = obj.y; return ts.__rest(obj, ['y', 'x']);",
+        "var x = other.x; return ts.__rest(obj, ['x']);",
+        "var x = obj.x; let tail; return ts.__rest(obj, ['x']);",
+    ] {
+        let input = format!("import * as ts from 'tslib'; function rest(obj) {{ {body} }}");
+        assert!(render_rule(&input, UnObjectRest::new).contains(".__rest("));
+    }
+}
+
+#[test]
+fn returned_rest_does_not_capture_existing_names() {
+    let input = r#"
+import * as ts from "tslib";
+function copy(obj, rest) {
+    use(rest, rest_1);
+    var x = obj.x;
+    return ts.__rest(obj, ["x"]);
+}
+"#;
+    let output = render_rule(input, UnObjectRest::new);
+    assert!(output.contains("...rest_2"), "{output}");
+    assert!(output.contains("use(rest, rest_1)"), "{output}");
+}
