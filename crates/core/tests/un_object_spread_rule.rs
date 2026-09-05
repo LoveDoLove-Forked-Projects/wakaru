@@ -1263,3 +1263,23 @@ var x = copyProps({}, source);
     let output = render(input);
     insta::assert_snapshot!(output);
 }
+
+#[test]
+fn direct_tslib_assign_restores_fresh_object_targets() {
+    let input = "var result = require('tslib').__assign({}, source);";
+    assert_eq_normalized(
+        &render_rule(input, UnObjectSpread::new_with_mark),
+        "var result = { ...source };",
+    );
+}
+
+#[test]
+fn direct_tslib_assign_preserves_mutation_and_dynamic_lookup() {
+    for input in [
+        "var result = require('tslib').__assign(target, source);",
+        "function copy(require) { return require('tslib').__assign({}, source); }",
+        "with (scope) { var result = require('tslib').__assign({}, source); }",
+    ] {
+        assert_eq_normalized(&render_rule(input, UnObjectSpread::new_with_mark), input);
+    }
+}

@@ -21,9 +21,7 @@ use super::helper_matcher::{
     remove_var_declarators_by_binding, static_member_prop_name, var_declarator_binding_key,
     NumericRequireNamespaces,
 };
-use super::transpiler_helper_utils::{
-    tslib_member_helper_kind, BindingKey, LocalHelperContext, TranspilerHelperKind,
-};
+use super::transpiler_helper_utils::{BindingKey, LocalHelperContext, TranspilerHelperKind};
 
 use crate::utils::paren::strip_parens;
 
@@ -177,7 +175,6 @@ fn run_un_object_spread(
             .map(|key| (key.clone(), TranspilerHelperKind::Extends)),
     );
     let swc_numeric_helper_namespaces = NumericRequireNamespaces::collect(module, unresolved_mark);
-    let tslib_namespaces = local_helper_context.tslib_namespaces();
     let has_inline_object_spread_call = has_inline_object_spread_call(
         module,
         &esbuild_aliases,
@@ -187,7 +184,8 @@ fn run_un_object_spread(
         && cross_module_ts_assign_refs.namespaces.is_empty()
         && swc_numeric_helper_namespaces.candidates.is_empty()
         && cross_module_helper_refs.namespaces.is_empty()
-        && tslib_namespaces.is_empty()
+        && local_helper_context.tslib_namespaces().is_empty()
+        && !local_helper_context.has_tslib_require_member_call(TranspilerHelperKind::Extends)
         && !has_inline_object_spread_call
     {
         return;
@@ -197,7 +195,7 @@ fn run_un_object_spread(
         cross_module_helper_namespaces: &cross_module_helper_refs.namespaces,
         cross_module_ts_assign_namespaces: &cross_module_ts_assign_refs.namespaces,
         swc_numeric_helper_namespaces: &swc_numeric_helper_namespaces.candidates,
-        tslib_namespaces,
+        local_helper_context,
         esbuild_aliases: &esbuild_aliases,
         esbuild_define_normal_prop_helpers: &esbuild_define_normal_prop_helpers,
     };
@@ -947,12 +945,14 @@ struct SpreadReplacer<'a> {
     cross_module_helper_namespaces: &'a HashMap<BindingKey, HashMap<String, TranspilerHelperKind>>,
     cross_module_ts_assign_namespaces: &'a HashMap<BindingKey, HashSet<String>>,
     swc_numeric_helper_namespaces: &'a HashSet<BindingKey>,
-    tslib_namespaces: &'a HashSet<BindingKey>,
+    local_helper_context: &'a LocalHelperContext,
     esbuild_aliases: &'a EsbuildObjectBuiltinAliases,
     esbuild_define_normal_prop_helpers: &'a HashSet<BindingKey>,
 }
 
 impl VisitMut for SpreadReplacer<'_> {
+    fn visit_mut_with_stmt(&mut self, _stmt: &mut swc_core::ecma::ast::WithStmt) {}
+
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
         expr.visit_mut_children_with(self);
 
@@ -1062,7 +1062,7 @@ impl SpreadReplacer<'_> {
             }
             Expr::Member(_) => {
                 matches!(
-                    tslib_member_helper_kind(callee, self.tslib_namespaces),
+                    self.local_helper_context.helper_callee_kind(callee),
                     Some(TranspilerHelperKind::Extends | TranspilerHelperKind::ObjectSpread)
                 ) || matches!(
                     cross_module_member_helper_kind(callee, self.cross_module_helper_namespaces),

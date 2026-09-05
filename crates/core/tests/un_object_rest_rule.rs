@@ -1863,3 +1863,22 @@ use(picked, rest, key);
         "the frozen alias declaration must remain: {output}"
     );
 }
+
+#[test]
+fn direct_tslib_rest_restores_object_destructuring() {
+    let input = "var rest = require('tslib').__rest(source, ['x']); use(rest);";
+    let output = render_rule(input, UnObjectRest::new);
+    assert!(output.contains("...rest"), "{output}");
+    assert!(!output.contains(".__rest("), "{output}");
+}
+
+#[test]
+fn direct_tslib_rest_preserves_shadowing_and_dynamic_lookup() {
+    for input in [
+        "function copy(require) { var rest = require('tslib').__rest(source, ['x']); use(rest); }",
+        "with (scope) { var rest = require('tslib').__rest(source, ['x']); use(rest); }",
+        "var rest = require('tslib').__rest(...args); use(rest);",
+    ] {
+        assert_eq_normalized(&render_rule(input, UnObjectRest::new), input);
+    }
+}
