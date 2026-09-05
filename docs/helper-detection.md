@@ -257,7 +257,11 @@ source index, output binding, or shadowed `Array` remain untouched.
 proven destructuring group. Indexed expressions, escaping temporary arrays,
 and incomplete groups retain their helper call; a later rule is not assumed
 to reconstruct a pattern. Zero-length calls also retain their binding if its
-result is still used.
+result is still used. Groups with default elements are the one hand-off:
+`UnSlicedToArray` skips them, and `UnDestructuring` drops the proven helper
+call when the rebuilt top-level pattern covers exactly the `N` elements the
+call materializes and has no rest element. `UnParameters2` then folds that
+pattern into the parameter as before.
 
 `UnSlicedToArray` also restores callback-local destructuring when a proven
 helper is applied directly to one callback parameter. It accepts either an

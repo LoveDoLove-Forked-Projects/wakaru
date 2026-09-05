@@ -1167,3 +1167,58 @@ use(primary, backup, _f);
 "#;
     assert_eq_normalized(&apply(input), expected);
 }
+
+#[test]
+fn complete_default_pattern_drops_proven_sliced_to_array_call() {
+    // UnSlicedToArray leaves default elements alone, so the ref still holds
+    // the helper result. The pattern reads exactly the two materialized
+    // elements, so the helper's source can be destructured directly.
+    let input = r#"
+import _slicedToArray from "@babel/runtime/helpers/slicedToArray";
+var _ref2 = _slicedToArray(_ref, 2);
+var head = _ref2[0];
+var _ref2$ = _ref2[1];
+var second = _ref2$ === undefined ? fallback : _ref2$;
+use(head, second);
+"#;
+    let expected = r#"
+import _slicedToArray from "@babel/runtime/helpers/slicedToArray";
+var [head, second = fallback] = _ref;
+use(head, second);
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
+
+#[test]
+fn default_pattern_keeps_sliced_to_array_call_when_length_or_identity_differs() {
+    // Fewer elements than the helper materializes: `_slicedToArray(_ref, 3)`
+    // also consumes a third iterator step that `[head, second]` would not.
+    let mismatched = r#"
+import _slicedToArray from "@babel/runtime/helpers/slicedToArray";
+var _ref2 = _slicedToArray(_ref, 3);
+var head = _ref2[0];
+var _ref2$ = _ref2[1];
+var second = _ref2$ === undefined ? fallback : _ref2$;
+use(head, second);
+"#;
+    let expected_mismatched = r#"
+import _slicedToArray from "@babel/runtime/helpers/slicedToArray";
+var [head, second = fallback] = _slicedToArray(_ref, 3);
+use(head, second);
+"#;
+    assert_eq_normalized(&apply(mismatched), expected_mismatched);
+
+    // A callee without helper identity is an ordinary call.
+    let unproven = r#"
+var _ref2 = customSlice(_ref, 2);
+var head = _ref2[0];
+var _ref2$ = _ref2[1];
+var second = _ref2$ === undefined ? fallback : _ref2$;
+use(head, second);
+"#;
+    let expected_unproven = r#"
+var [head, second = fallback] = customSlice(_ref, 2);
+use(head, second);
+"#;
+    assert_eq_normalized(&apply(unproven), expected_unproven);
+}

@@ -1,10 +1,10 @@
 {
-  "commit": "d085e62f",
+  "commit": "9ebe9e52",
   "date": "2026-09-05",
   "aggregate": {
-    "yes": 1889,
+    "yes": 1895,
     "total": 1969,
-    "pct": 95.9
+    "pct": 96.2
   },
   "matrices": [
     {
@@ -81,11 +81,11 @@
     },
     {
       "name": "parameters",
-      "yes": 104,
-      "no": 6,
+      "yes": 110,
+      "no": 0,
       "error": 0,
       "total": 110,
-      "pct": 94.5
+      "pct": 100
     },
     {
       "name": "swc-minifier",

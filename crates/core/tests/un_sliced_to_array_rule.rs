@@ -723,7 +723,10 @@ function read(pair) {
 }
 
 #[test]
-fn nested_default_pattern_preserves_iterator_materialization() {
+fn recovers_array_destructured_default_parameter_from_nested_helper() {
+    // UnSlicedToArray leaves the default element to UnDestructuring, which
+    // drops the proven helper once the pattern covers both materialized
+    // elements; UnParameters2 then folds the pattern into the parameter.
     let input = r#"
 function _arrayWithHoles(arr) {
     if (Array.isArray(arr)) return arr;
@@ -740,11 +743,12 @@ function first() {
     return use(head, second);
 }
 "#;
-    let output = render(input);
-    // Defaults can observe iterator effects, so retain materialization until
-    // their evaluation order can be proved equivalent too.
-    assert!(output.contains("= _slicedToArray(_ref, 2)"), "{output}");
-    assert!(output.contains("second = fallback"), "{output}");
+    let expected = r#"
+function first([head, second = fallback] = []) {
+    return use(head, second);
+}
+"#;
+    assert_eq_normalized(&render(input), expected);
 }
 
 #[test]

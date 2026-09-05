@@ -742,6 +742,7 @@ fn try_reconstruct_group(
         stmts,
         start,
         unresolved_mark,
+        sliced_to_array_helpers,
         array_like_to_array_helpers,
         &mut group_helpers,
     ) {
@@ -1303,10 +1304,11 @@ fn try_reconstruct_ref_group(
     stmts: &[Stmt],
     start: usize,
     unresolved_mark: Mark,
+    sliced_to_array_helpers: &HashSet<BindingKey>,
     array_like_to_array_helpers: &HashSet<BindingKey>,
     consumed_helpers: &mut Vec<BindingKey>,
 ) -> Option<ReconstructedGroup> {
-    let ref_decl = extract_ref_decl(stmts.get(start)?)?;
+    let mut ref_decl = extract_ref_decl(stmts.get(start)?)?;
     let ref_key = binding_key(&ref_decl.ident.id);
 
     let mut removed_temps = Vec::new();
@@ -1349,6 +1351,15 @@ fn try_reconstruct_ref_group(
     }
 
     let pat = build_pat_from_accesses(collected.accesses)?;
+    // `UnSlicedToArray` leaves default elements to this rule, so the ref may
+    // still hold the materialized helper result. Once the pattern covers the
+    // same N elements, destructure the helper's source directly.
+    if let Some((source, helper)) =
+        complete_sliced_to_array_source(&ref_decl.init, &pat, sliced_to_array_helpers)
+    {
+        ref_decl.init = source;
+        consumed_helpers.push(helper);
+    }
     let kind = declaration_kind_for_pattern_bindings(&pat, &stmts[start + 1..i], ref_decl.kind);
     let stmt = build_var_stmt(&ref_decl, pat, kind);
     Some(ReconstructedGroup {
@@ -1356,6 +1367,47 @@ fn try_reconstruct_ref_group(
         consumed: i - start,
         remove_prior_bindings: Vec::new(),
     })
+}
+
+/// `[a, b = d] = x` reads exactly the elements `helper(x, N)` materializes.
+/// Returns the helper's source and binding when `init` is a proven
+/// sliced-to-array call whose length literal equals the pattern's element
+/// count and the pattern has no rest element (the helper truncates to N).
+fn complete_sliced_to_array_source(
+    init: &Expr,
+    pat: &Pat,
+    sliced_to_array_helpers: &HashSet<BindingKey>,
+) -> Option<(Box<Expr>, BindingKey)> {
+    let Pat::Array(array) = pat else {
+        return None;
+    };
+    if array
+        .elems
+        .iter()
+        .any(|elem| matches!(elem, Some(Pat::Rest(_))))
+    {
+        return None;
+    }
+    let Expr::Call(call) = strip_parens(init) else {
+        return None;
+    };
+    let Callee::Expr(callee) = &call.callee else {
+        return None;
+    };
+    let helper = sliced_to_array_callee_binding(callee.as_ref(), sliced_to_array_helpers)?;
+    if call.args.len() != 2 || call.args.iter().any(|arg| arg.spread.is_some()) {
+        return None;
+    }
+    let Expr::Lit(Lit::Num(length)) = strip_parens(call.args[1].expr.as_ref()) else {
+        return None;
+    };
+    if length.value.fract() != 0.0
+        || length.value < 1.0
+        || length.value as usize != array.elems.len()
+    {
+        return None;
+    }
+    Some((call.args[0].expr.clone(), helper))
 }
 
 struct CollectedAccesses {
