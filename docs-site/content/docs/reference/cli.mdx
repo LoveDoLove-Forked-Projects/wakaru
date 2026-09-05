@@ -110,12 +110,15 @@ tooling.
 wakaru input.js --diagnostics              # post-transform checks to stderr
 wakaru input.js --profile trace.json       # Chrome trace; add --profile-rules for per-rule spans
 wakaru debug validate out/                 # validate an unpacked output tree as one module graph
+wakaru debug validate out/ --input bundle.js  # also report free identifiers that the input never left free
 ```
 
 `debug validate` reports dangling references, broken imports/exports,
-duplicate declarations, and writes to imported or `const` bindings. It exits
-nonzero when it finds anything. Validate normal output only: raw output has
-no module-graph contract.
+duplicate declarations, writes to imported or `const` bindings, and free
+identifiers that exactly one other module declares at module scope. With
+`--input`, it also reports free identifiers that are not free anywhere in the
+original bundle. It exits nonzero when it finds anything. Validate normal
+output only: raw output has no module-graph contract.
 
 ## Overwrite protection
 

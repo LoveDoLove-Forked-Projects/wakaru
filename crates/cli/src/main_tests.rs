@@ -131,7 +131,37 @@ fn parses_debug_validate_command() {
             command: DebugCommand::Validate(args),
         })) => {
             assert_eq!(args.dir, PathBuf::from("out"));
+            assert!(args.input.is_empty());
             assert!(args.json);
+        }
+        other => panic!("expected debug validate command, got {other:?}"),
+    }
+}
+
+#[test]
+fn parses_debug_validate_command_with_repeated_inputs() {
+    let cli = Cli::try_parse_from([
+        "wakaru",
+        "debug",
+        "validate",
+        "out",
+        "--input",
+        "bundle.js",
+        "--input",
+        "chunks",
+    ])
+    .expect("debug validate command should parse");
+
+    match cli.command {
+        Some(Command::Debug(DebugArgs {
+            command: DebugCommand::Validate(args),
+        })) => {
+            assert_eq!(args.dir, PathBuf::from("out"));
+            assert_eq!(
+                args.input,
+                vec![PathBuf::from("bundle.js"), PathBuf::from("chunks")]
+            );
+            assert!(!args.json);
         }
         other => panic!("expected debug validate command, got {other:?}"),
     }

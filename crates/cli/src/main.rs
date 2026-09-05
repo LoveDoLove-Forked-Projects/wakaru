@@ -220,6 +220,11 @@ struct ValidateArgs {
     /// Directory containing emitted modules (normal unpack output).
     dir: PathBuf,
 
+    /// Original bundle input (file or directory; repeatable). Free identifiers
+    /// in the output that are not free anywhere in these inputs are reported.
+    #[arg(long, value_name = "PATH")]
+    input: Vec<PathBuf>,
+
     /// Print findings as JSON.
     #[arg(long)]
     json: bool,
@@ -826,11 +831,29 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
         modules.push((relative, source));
     }
 
-    let findings = wakaru_core::validate_output_modules(&modules);
+    let mut inputs = Vec::new();
+    for input in &args.input {
+        let files = if input.is_dir() {
+            collect_directory_js_inputs(input)?
+        } else {
+            vec![input.clone()]
+        };
+        for path in files {
+            let source = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read input {}", path.display()))?;
+            inputs.push((path.to_string_lossy().replace('\\', "/"), source));
+        }
+    }
+    if !args.input.is_empty() && inputs.is_empty() {
+        anyhow::bail!("no JavaScript files found under the --input paths");
+    }
+
+    let findings = wakaru_core::validate_output_modules_with_inputs(&modules, &inputs);
 
     if args.json {
         let payload = serde_json::json!({
             "modules": modules.len(),
+            "inputs": inputs.len(),
             "findings": findings
                 .iter()
                 .map(validate_finding_json)

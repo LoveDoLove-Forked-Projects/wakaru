@@ -73,7 +73,15 @@ findings exist, so harnesses can gate on it.
 cargo run -p wakaru-cli -- --unpack bundle.js -o out/
 cargo run -p wakaru-cli -- debug validate out/          # human-readable
 cargo run -p wakaru-cli -- debug validate out/ --json   # machine-readable
+cargo run -p wakaru-cli -- debug validate out/ --input bundle.js  # + free identifiers not free in the input
 ```
+
+Pass the original bundle with `--input` when triaging a real-world output: a
+free identifier that the input never uses freely was introduced by wakaru,
+while everything the input already left free (host probes, define constants,
+upstream dependency bugs) stays silent. Without `--input`, free identifiers
+are reported only when exactly one other emitted module declares the name at
+module scope, the shape a split leaves when it drops an import/export edge.
 
 Point it at **normal** unpack output only — `--raw` output promises only "no
 readability transforms" and carries no module-graph contract, so raw-only

@@ -262,6 +262,7 @@ one emitted-module graph:
 ```bash
 wakaru debug validate out/
 wakaru debug validate out/ --json
+wakaru debug validate out/ --input bundle.js   # also compare free identifiers against the input
 ```
 
 The validator reports dangling relative references, imports or re-exports of
@@ -273,8 +274,29 @@ writes to imported or `const` bindings. It also reports unresolved `module` /
 `.mjs` / `.mts` files and in-tree static or dynamic import targets use the
 module source goal even when they contain no import/export declaration
 themselves; explicit `.cjs` / `.cts` files retain the script/CommonJS source
-goal even when imported by ESM. Writes to undeclared identifiers (host
-globals) are not reported.
+goal even when imported by ESM.
+
+Free identifiers are reported as `unresolved_reference` only when the graph
+proves them wrong. Without `--input`, that proof is structural: exactly one
+other emitted module declares the same name at module scope, which is the
+shape a split leaves behind when it separates a declaration from its users
+without adding the import/export edge. Names declared by several modules are
+ambiguous reused locals and stay silent. With `--input PATH` (a file or a
+directory, repeatable), the original bundle is parsed too, and any free
+identifier in the output that is free nowhere in the input is reported as
+well: host globals, build-time define constants, `typeof` probes, and
+dependency bugs that the input already contains are excused, while a name the
+rewrite pipeline or the splitter left undeclared is not. Input evidence is
+authoritative: a name the input uses freely is never reported, even when the
+structural proof would match it (same spelling is not binding identity). If
+any input fails to parse, the input comparison is skipped rather than run on
+a partial baseline. ECMAScript built-ins,
+module-runtime names (`require`, `define`, `global`, ...), and, for the
+structural proof only, well-known host globals that shim modules declare are
+never reported. Other writes to undeclared identifiers (host globals) are not
+reported: without an input or a sibling declaration there is no environment
+model to judge them against. An input that fails to parse is reported as a
+`parse_error` on the input filename.
 Human-readable findings use `filename:line:column`; JSON findings carry
 one-based `line` and `column` fields. The recursive scan accepts `.js`, `.mjs`,
 `.cjs`, `.jsx`, `.ts`, `.tsx`, `.mts`, `.cts`, and extensionless emitted
