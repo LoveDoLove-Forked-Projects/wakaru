@@ -28,14 +28,9 @@ use super::transpiler_helper_utils::{
 use super::RewriteLevel;
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
-/// Detects and unwraps `_slicedToArray(expr, N)` helper calls.
-///
-/// Transforms:
-///   `var _ref = _slicedToArray(expr, N)` → `var _ref = expr`
-///   `var _ref = _slicedToArray(expr, 0)` → `var [] = expr`
-///
-/// The downstream `SmartInline` + destructuring rules handle converting
-/// `var a = _ref[0]; var b = _ref[1]` → `const [a, b] = expr`.
+/// Restores complete destructuring groups backed by iterator helpers.
+/// A helper call is retained when its materialized array still has uses that
+/// cannot be consumed by the recovered pattern.
 pub struct UnSlicedToArray<'a> {
     module_facts: Option<&'a ModuleFactsMap>,
     current_filename: Option<&'a str>,
@@ -257,18 +252,6 @@ impl VisitMut for SlicedToArrayRewriter<'_> {
             self.maybe_array_like,
             self.unresolved_mark,
         );
-        for item in items {
-            let ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) = item else {
-                continue;
-            };
-            rewrite_sliced_to_array_decls(
-                &mut var.decls,
-                self.local_helpers,
-                self.cross_module_helpers,
-                self.maybe_array_like,
-                self.unresolved_mark,
-            );
-        }
     }
 
     fn visit_mut_stmts(&mut self, stmts: &mut Vec<Stmt>) {
@@ -281,18 +264,6 @@ impl VisitMut for SlicedToArrayRewriter<'_> {
             self.level,
             self.unresolved_mark,
         );
-        for stmt in stmts {
-            let Stmt::Decl(Decl::Var(var)) = stmt else {
-                continue;
-            };
-            rewrite_sliced_to_array_decls(
-                &mut var.decls,
-                self.local_helpers,
-                self.cross_module_helpers,
-                self.maybe_array_like,
-                self.unresolved_mark,
-            );
-        }
     }
 }
 
@@ -827,9 +798,6 @@ fn try_fold_sliced_to_array_module_item_group(
     ) else {
         return false;
     };
-    if extraction.length == Some(0) {
-        return false;
-    }
     if module_item_sliced_ref_is_unreferenced(body, start, &extraction.ref_binding.id) {
         let Some(length) = extraction.length else {
             return false;
@@ -965,9 +933,6 @@ fn try_fold_sliced_to_array_stmt_group(
     ) else {
         return false;
     };
-    if extraction.length == Some(0) {
-        return false;
-    }
     if allow_assignment_index_folds
         && try_fold_sliced_to_array_stmt_assignment_access_group(stmts, start, extraction)
     {
@@ -1552,26 +1517,6 @@ fn stmt_sliced_ref_is_unreferenced(
         .is_none_or(|_| !ident_used_in_stmts(&stmts[start + 1..], ref_ident))
 }
 
-fn rewrite_sliced_to_array_decls(
-    decls: &mut Vec<VarDeclarator>,
-    local_helpers: &LocalHelperContext,
-    cross_module_helpers: &CrossModuleHelperRefs,
-    maybe_array_like: &HashSet<BindingKey>,
-    unresolved_mark: Option<Mark>,
-) {
-    let mut i = 0;
-    while i < decls.len() {
-        try_unwrap_sliced_to_array(
-            &mut decls[i],
-            local_helpers,
-            cross_module_helpers,
-            maybe_array_like,
-            unresolved_mark,
-        );
-        i += 1;
-    }
-}
-
 fn extract_sliced_to_array_decl(
     decl: &VarDeclarator,
     local_helpers: &LocalHelperContext,
@@ -1669,42 +1614,6 @@ fn member_index(member: &MemberExpr) -> Option<usize> {
         return None;
     };
     numeric_length(num.value)
-}
-
-fn try_unwrap_sliced_to_array(
-    decl: &mut VarDeclarator,
-    local_helpers: &LocalHelperContext,
-    cross_module_helpers: &CrossModuleHelperRefs,
-    maybe_array_like: &HashSet<BindingKey>,
-    unresolved_mark: Option<Mark>,
-) {
-    let Some(init) = &decl.init else { return };
-    let Expr::Call(call) = init.as_ref() else {
-        return;
-    };
-
-    let Some((source, length_val)) = extract_sliced_call_args(
-        call,
-        local_helpers,
-        cross_module_helpers,
-        maybe_array_like,
-        unresolved_mark,
-    ) else {
-        return;
-    };
-    let Some(length) = numeric_length(length_val) else {
-        return;
-    };
-
-    if length == 0 {
-        decl.name = Pat::Array(ArrayPat {
-            span: DUMMY_SP,
-            elems: vec![],
-            optional: false,
-            type_ann: None,
-        });
-    }
-    decl.init = Some(Box::new(source.clone()));
 }
 
 fn is_sliced_to_array_callee(

@@ -15,7 +15,7 @@ var _ref = _slicedToArray(a, 2);
 var name = _ref[0];
 var value = _ref[1];
 "#;
-    // slicedToArray just unwraps; destructuring reconstruction is done by downstream rules
+    // The helper and all indexed bindings are recovered together.
     let output = render(input);
     insta::assert_snapshot!(output);
 }
@@ -109,12 +109,14 @@ fn handles_cross_module_default_object_helper_member_fact() {
 
     let input = r#"
 import helpers from "./helpers.js";
-var _useState = helpers._(useState(value), 2), current = _useState[0], setCurrent = _useState[1];
+var _useState = helpers._(useState(value), 2);
+var current = _useState[0];
+var setCurrent = _useState[1];
 use(current, setCurrent);
 "#;
     let expected = r#"
 import helpers from "./helpers.js";
-var _useState = useState(value), current = _useState[0], setCurrent = _useState[1];
+var [current, setCurrent] = useState(value);
 use(current, setCurrent);
 "#;
     assert_eq_normalized(
@@ -239,21 +241,11 @@ function Component() {
     use(current, setCurrent);
 }
 "#;
-    let expected = r#"
-function Component() {
-    var current;
-    var setCurrent;
-    var tuple = useState(value);
-    current = tuple[0];
-    setCurrent = tuple[1];
-    use(current, setCurrent);
-}
-"#;
     assert_eq_normalized(
         &common::render_rule(input, |_| {
             UnSlicedToArray::new_with_level(RewriteLevel::Minimal)
         }),
-        expected,
+        input,
     );
 }
 
@@ -349,12 +341,14 @@ fn unwraps_cross_module_ts_read_helper_fact() {
 
     let input = r#"
 import { __read } from "./helpers.js";
-var _a = __read(pair, 2), first = _a[0], second = _a[1];
+var _a = __read(pair, 2);
+var first = _a[0];
+var second = _a[1];
 use(first, second);
 "#;
     let expected = r#"
 import { __read } from "./helpers.js";
-var _a = pair, first = _a[0], second = _a[1];
+var [first, second] = pair;
 use(first, second);
 "#;
     assert_eq_normalized(
@@ -384,7 +378,9 @@ var __read = (this && this.__read) || function (o, n) {
     }
     return ar;
 };
-var _a = __read(pair, 2), first = _a[0], second = _a[1];
+var _a = __read(pair, 2);
+var first = _a[0];
+var second = _a[1];
 use(first, second);
 "#;
     let expected = r#"
@@ -437,14 +433,14 @@ _slicedToArray(a, 2, 3);
 }
 
 #[test]
-fn removes_helper_declaration() {
+fn incomplete_group_retains_helper_declaration() {
     let input = r#"
 var _slicedToArray = require("@babel/runtime/helpers/slicedToArray");
 var _ref = _slicedToArray(a, 2);
 var name = _ref[0];
 "#;
     let output = render(input);
-    insta::assert_snapshot!(output);
+    insta::assert_snapshot!("removes_helper_declaration", output);
 }
 
 // ---------------------------------------------------------------------------
@@ -727,7 +723,7 @@ function read(pair) {
 }
 
 #[test]
-fn recovers_array_destructured_default_parameter_from_nested_helper() {
+fn nested_default_pattern_preserves_iterator_materialization() {
     let input = r#"
 function _arrayWithHoles(arr) {
     if (Array.isArray(arr)) return arr;
@@ -744,12 +740,11 @@ function first() {
     return use(head, second);
 }
 "#;
-    let expected = r#"
-function first([head, second = fallback] = []) {
-    return use(head, second);
-}
-"#;
-    assert_eq_normalized(&render(input), expected);
+    let output = render(input);
+    // Defaults can observe iterator effects, so retain materialization until
+    // their evaluation order can be proved equivalent too.
+    assert!(output.contains("= _slicedToArray(_ref, 2)"), "{output}");
+    assert!(output.contains("second = fallback"), "{output}");
 }
 
 #[test]
@@ -764,13 +759,9 @@ function _slicedToArray(arr, i) {
 var _ref = _slicedToArray(pair, 2), key = _ref[0], value = _ref[1];
 use(key, value, _ref);
 "#;
-    let expected = r#"
-const _ref = pair;
-const key = _ref[0];
-const value = _ref[1];
-use(key, value, _ref);
-"#;
-    assert_eq_normalized(&render(input), expected);
+    let output = render(input);
+    assert!(output.contains("_slicedToArray(pair, 2)"), "{output}");
+    assert!(output.contains("use(key, value, _ref)"), "{output}");
 }
 
 #[test]
@@ -1162,6 +1153,33 @@ fn spread_sliced_helper_arguments_are_preserved() {
     let input = r#"
 import sliced from "@babel/runtime/helpers/slicedToArray";
 const tuple = sliced(...args);
+"#;
+    assert_eq_normalized(
+        &common::render_rule(input, |_| UnSlicedToArray::new()),
+        input,
+    );
+}
+
+#[test]
+fn indexed_expression_keeps_iterator_materialization() {
+    let input = r#"
+import { __read } from "tslib";
+function read(items) {
+    var pair = __read(items, 2);
+    return pair[0] + pair[1];
+}
+"#;
+    let output = common::render_rule(input, |_| UnSlicedToArray::new());
+    assert_eq_normalized(&output, input);
+    assert!(render(input).contains("__read(items, 2)"));
+}
+
+#[test]
+fn escaping_zero_length_result_keeps_its_binding() {
+    let input = r#"
+import { __read } from "tslib";
+var result = __read(items, 0);
+consume(result);
 "#;
     assert_eq_normalized(
         &common::render_rule(input, |_| UnSlicedToArray::new()),

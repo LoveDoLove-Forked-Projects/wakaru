@@ -248,6 +248,12 @@ an unresolved `Array(length)` allocation, a bounded element-for-element copy
 loop, and return of that exact allocation. Near-matches with a different guard,
 source index, output binding, or shadowed `Array` remain untouched.
 
+`UnSlicedToArray` removes iterator materialization only together with a
+proven destructuring group. Indexed expressions, escaping temporary arrays,
+and incomplete groups retain their helper call; a later rule is not assumed
+to reconstruct a pattern. Zero-length calls also retain their binding if its
+result is still used.
+
 `UnSlicedToArray` also restores callback-local destructuring when a proven
 helper is applied directly to one callback parameter. It accepts either an
 unconditional leading declaration such as
