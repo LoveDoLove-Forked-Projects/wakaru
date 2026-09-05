@@ -1065,15 +1065,12 @@ var Child = (function(_super) {
     t.prototype.run = function run() { return true; }
     return t;
 }(Base));"#;
-    // _super.apply(this, arguments) is rewritten to super(...arguments)
-    let expected = r#"
-class Child extends Base {
-    constructor() {
-        _super !== null && super(...arguments);
-    }
-    run() { return true; }
-}"#;
-    assert_eq_normalized(&apply(input), expected);
+    // The constructor still needs the wrapper's null guard. Removing the
+    // wrapper would leave _super unbound even if its apply call became super().
+    let output = apply(input);
+    assert!(output.contains("function(_super)"), "{output}");
+    assert!(output.contains("_super.apply(this, arguments)"), "{output}");
+    assert!(!output.contains("class Child extends Base"), "{output}");
 }
 
 #[test]
@@ -2309,4 +2306,50 @@ consume(Shared);
         output.warnings,
         output.code
     );
+}
+
+#[test]
+fn typescript_inheritance_keeps_the_superclass_parameter_scope() {
+    // TypeScript 5.9.3, ES5 + CommonJS + importHelpers. The constructor's
+    // null guard and the method's prototype call still depend on _super.
+    let input = r#"
+var tslib_1 = require("tslib");
+var Child = (function (_super) {
+    tslib_1.__extends(Child, _super);
+    function Child() {
+        return _super !== null && _super.apply(this, arguments) || this;
+    }
+    Child.prototype.value = function () {
+        return _super.prototype.value.call(this) + 1;
+    };
+    return Child;
+}(Parent));
+exports.Child = Child;
+"#;
+    let output = apply(input);
+    assert!(output.contains("function(_super)"), "{output}");
+    assert!(
+        output.contains("tslib_1.__extends(Child, _super)"),
+        "{output}"
+    );
+    assert!(!output.contains("class Child extends Parent"), "{output}");
+}
+
+#[test]
+fn inherited_methods_keep_captured_superclass_references() {
+    // A fully rewritten constructor does not prove that methods no longer
+    // depend on the wrapper. Inspect every recovered class member.
+    let input = r#"
+import { __extends } from "tslib";
+var Child = (function (base) {
+    __extends(Child, base);
+    function Child() { base.call(this); }
+    Child.prototype.parent = function () { return base; };
+    return Child;
+}(Parent));
+"#;
+    let output = apply(input);
+    assert!(output.contains("function(base)"), "{output}");
+    assert!(output.contains("return base"), "{output}");
+    assert!(!output.contains("class Child extends Parent"), "{output}");
 }

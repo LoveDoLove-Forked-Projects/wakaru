@@ -60,7 +60,8 @@ shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
 - Tagged templates miss namespace calls and mangled named aliases.
 - External private-field helpers remain; mangled inline helpers also remain.
 - Compressed object-rest and array-destructuring cases do not fully recover.
-- Inheritance recovery retains helper machinery or invalid superclass aliases.
+- Inheritance recovery retains its IIFE when members still capture the
+  superclass parameter; full superclass recovery remains incomplete.
 - Some current inline interop helper bodies are not recognized.
 
 The original tslib awaiter regression passes all 18 ES5/ES2015 profiles.

@@ -1144,6 +1144,19 @@ fn try_iife_to_class(
         rewrite_level >= RewriteLevel::Standard,
         unresolved_mark,
     )?;
+    // Removing the IIFE also removes its parameter bindings. Constructor
+    // rewriting can consume some superclass uses while leaving guards or
+    // method closures that still capture the parameter. Preserve that scope
+    // until every remaining use has a valid representation in the class.
+    for param in &param_pats {
+        let bindings: Vec<BindingKey> = find_pat_ids(*param);
+        if bindings
+            .iter()
+            .any(|(name, ctxt)| class_members_reference_binding(&class_body, name, *ctxt))
+        {
+            return None;
+        }
+    }
     if class_name.sym.as_ref() != inner_ctor_name
         && class_members_reference_binding(
             &class_body,
