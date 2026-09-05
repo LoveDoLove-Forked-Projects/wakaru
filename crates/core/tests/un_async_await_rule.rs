@@ -2563,3 +2563,201 @@ function g() {
         "identifier arguments/Promise slots under a with statement must keep the wrapper:\n{output}"
     );
 }
+
+// TypeScript 5.9.3 --importHelpers emits these call frames (ES2015/ES5).
+fn tslib_async_body(awaiter: &str, generator: Option<&str>) -> String {
+    let body = generator.map_or_else(
+        || "function* () { var result = yield value; return result + 1; }".to_string(),
+        |generator| {
+            format!(
+                r#"function () {{
+            var result;
+            return {generator}(this, function (state) {{
+                switch (state.label) {{
+                    case 0: return [4, value];
+                    case 1: result = state.sent(); return [2, result + 1];
+                }}
+            }});
+        }}"#
+            )
+        },
+    );
+    format!("function load(value) {{ return {awaiter}(this, void 0, void 0, {body}); }}")
+}
+
+#[test]
+fn tslib_namespace_async_helpers_restore_both_targets() {
+    for declaration in [
+        "var runtime = require(\"tslib\");",
+        "import * as runtime from \"tslib\";",
+        "import runtime from \"tslib\";",
+        "import * as runtime from \"tslib/tslib.es6.js\";",
+    ] {
+        for generator in [None, Some("runtime.__generator")] {
+            let input = format!(
+                "{declaration}\n{}",
+                tslib_async_body("runtime.__awaiter", generator)
+            );
+            let statements = if generator.is_some() {
+                "var result; result = await value; return result + 1;"
+            } else {
+                "var result = await value; return result + 1;"
+            };
+            let expected = format!("{declaration}\nasync function load(value) {{ {statements} }}");
+            assert_eq_normalized(&apply_without_helpers(&input), &expected);
+        }
+    }
+}
+
+#[test]
+fn tslib_direct_require_member_async_helpers_restore_both_targets() {
+    for generator in [None, Some("require(\"tslib\").__generator")] {
+        let input = tslib_async_body("require(\"tslib\").__awaiter", generator);
+        let statements = if generator.is_some() {
+            "var result; result = await value; return result + 1;"
+        } else {
+            "var result = await value; return result + 1;"
+        };
+        assert_eq_normalized(
+            &apply_without_helpers(&input),
+            &format!("async function load(value) {{ {statements} }}"),
+        );
+    }
+}
+
+#[test]
+fn tslib_mixed_alias_and_namespace_return_the_awaited_value() {
+    for (alias, member, awaiter, generator) in [
+        ("runAsync", "__awaiter", "runAsync", "runtime.__generator"),
+        (
+            "runGenerator",
+            "__generator",
+            "runtime.__awaiter",
+            "runGenerator",
+        ),
+    ] {
+        let declaration =
+            format!("var runtime = require(\"tslib\"); var {alias} = runtime.{member};");
+        let input = format!(
+            "{declaration}\n{}",
+            tslib_async_body(awaiter, Some(generator))
+        );
+        // In particular, an async function returning runtime.__generator is
+        // NOT a successful recovery: its resolved value would be an iterator.
+        let expected = format!(
+            r#"{declaration}
+            async function load(value) {{
+                var result;
+                result = await value;
+                return result + 1;
+            }}"#
+        );
+        assert_eq_normalized(&apply_without_helpers(&input), &expected);
+        let output = render(&input);
+        assert!(output.contains("async function load(value)"), "{output}");
+        assert!(output.contains("await value"), "{output}");
+        assert!(
+            !output.contains("__generator("),
+            "must return the value, not an iterator: {output}"
+        );
+    }
+}
+
+#[test]
+fn tslib_namespace_members_require_matching_binding_and_source() {
+    for declaration in [
+        "import * as runtime from \"./other.js\";",
+        "var runtime = require(\"other\");",
+        "var runtime = customRuntime;",
+    ] {
+        let input = format!(
+            "{declaration}\n{}",
+            tslib_async_body("runtime.__awaiter", Some("runtime.__generator"))
+        );
+        assert_eq_normalized(&apply_without_helpers(&input), &input);
+    }
+    let shadowed = format!(
+        "import * as runtime from \"tslib\"; function wrapper(runtime) {{ {} return load; }}",
+        tslib_async_body("runtime.__awaiter", Some("runtime.__generator"))
+    );
+    assert_eq_normalized(&apply_without_helpers(&shadowed), &shadowed);
+}
+
+#[test]
+fn tslib_async_members_do_not_trust_shadowed_require() {
+    for body in [
+        format!(
+            "var runtime = require(\"tslib\"); {}",
+            tslib_async_body("runtime.__awaiter", Some("runtime.__generator"))
+        ),
+        tslib_async_body(
+            "require(\"tslib\").__awaiter",
+            Some("require(\"tslib\").__generator"),
+        ),
+    ] {
+        let input = format!("function require(name) {{ return customRuntime; }} {body}");
+        assert_eq_normalized(&apply_without_helpers(&input), &input);
+        assert!(!render(&input).contains("async function load"));
+    }
+}
+
+#[test]
+fn tslib_namespace_async_rollback_keeps_unsupported_generator() {
+    let input = r#"
+        import * as runtime from "tslib";
+        function load(value) {
+            return runtime.__awaiter(this, void 0, void 0, function () {
+                return runtime.__generator(this, function (state) {
+                    switch (state.label) {
+                        case 0: return [3, 99];
+                        case 1: return [2, value];
+                    }
+                });
+            });
+        }
+    "#;
+    assert_eq_normalized(&apply_without_helpers(input), input);
+    assert!(!render(input).contains("async function load"));
+}
+
+#[test]
+fn tslib_namespace_awaiter_keeps_noncanonical_frame() {
+    let input = format!(
+        "import * as runtime from \"tslib\"; {}",
+        tslib_async_body("runtime.__awaiter", None)
+    )
+    .replace("this, void 0, void 0", "this, void 0, CustomPromise");
+    assert_eq_normalized(&apply_without_helpers(&input), &input);
+}
+
+#[test]
+fn tslib_namespace_awaiter_restores_expression_position() {
+    let input = r#"
+        import * as runtime from "tslib";
+        consume(runtime.__awaiter(void 0, void 0, void 0, function* () {
+            return yield ready();
+        }));
+    "#;
+    let expected = r#"
+        import * as runtime from "tslib";
+        consume(async function () { return await ready(); }());
+    "#;
+    assert_eq_normalized(&apply_without_helpers(input), expected);
+}
+
+#[test]
+fn tslib_namespace_members_preserve_with_lookup() {
+    for callee in ["runtime.__awaiter", "require(\"tslib\").__awaiter"] {
+        let input = format!(
+            r#"
+            var runtime = require("tslib");
+            with (scope) {{
+                consume({callee}(void 0, void 0, void 0, function* () {{
+                    return yield ready();
+                }}));
+            }}
+        "#
+        );
+        assert_eq_normalized(&apply_without_helpers(&input), &input);
+    }
+}

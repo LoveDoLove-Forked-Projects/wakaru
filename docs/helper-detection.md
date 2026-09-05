@@ -155,6 +155,14 @@ a new predicate.
 
 `LocalHelperContext` also records TypeScript and `tslib` helper identities. Consumers use those binding identities directly; for example `UnAsyncAwait` matches detected `__awaiter` / `__generator` aliases instead of first renaming aliases to canonical global names. Shared call-site helpers such as `is_helper_callee()` cover local helper bindings, tslib namespace members, and direct `require("tslib").helper` calls.
 
+`UnAsyncAwait` uses the raw TS call-site helpers for known tslib namespace
+members and direct `require("tslib").__awaiter` / `.__generator` calls in both
+single-file and unpack pipelines. The namespace must match a collected binding,
+and `require` must be unresolved; a `with` statement prevents member recovery
+because it can override those lookups. The same callee checks drive generator
+decoding and rollback, so a mixed alias/member wrapper cannot lose its awaiter
+while returning an undecoded generator iterator.
+
 Helper utilities include `LocalHelperContext::helpers_of_kind()` (filter by kind), `remove_helper_declarations()` (delete the helper function), `helpers_with_remaining_refs()` (check if a helper binding is still referenced elsewhere), and TS cleanup helpers such as `remove_unused_inline_ts_helpers()` / `remove_unused_ts_helper_bindings()`.
 
 `collect_module_facts()` records two helper export channels:

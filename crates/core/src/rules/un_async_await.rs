@@ -24,7 +24,10 @@ use super::state_machine::{
     invert_condition, stmts_contain_state_opcode_return, ForwardJumpJoin, IndexLoopContinueMode,
     OpcodeReturnScan, StateMachineProgram,
 };
-use super::transpiler_helper_utils::{BindingKey, LocalHelperContext, TsHelperKind};
+use super::transpiler_helper_utils::{
+    tslib_member_ts_helper_kind, tslib_require_ts_helper_kind_with_mark, BindingKey,
+    LocalHelperContext, TsHelperKind,
+};
 use crate::facts::{ModuleFactsMap, TypeScriptHelperKind};
 use crate::js_names::is_likely_generated_alias;
 use crate::utils::paren::strip_parens;
@@ -65,7 +68,7 @@ impl UnAsyncAwait {
 
 impl VisitMut for UnAsyncAwait {
     fn visit_mut_module(&mut self, module: &mut Module) {
-        let local_helpers = LocalHelperContext::collect(module);
+        let local_helpers = LocalHelperContext::collect_with_mark(module, self.unresolved_mark);
         let mut helpers =
             AsyncHelperContext::from_local_helpers(&local_helpers, Some(self.unresolved_mark));
         helpers.record_module_hazards(module);
@@ -103,6 +106,7 @@ impl VisitMut for AwaiterIifeTransformer<'_> {
 
 #[derive(Default)]
 struct AsyncHelperContext {
+    tslib_namespaces: HashSet<BindingKey>,
     awaiter_helpers: HashSet<BindingKey>,
     awaiter_namespaces: HashMap<BindingKey, HashSet<String>>,
     generator_helpers: HashSet<BindingKey>,
@@ -128,6 +132,7 @@ impl AsyncHelperContext {
         unresolved_mark: Option<Mark>,
     ) -> Self {
         Self {
+            tslib_namespaces: local_helpers.tslib_namespaces().clone(),
             awaiter_helpers: local_helpers.ts_helpers_of_kind(TsHelperKind::Awaiter),
             awaiter_namespaces: HashMap::new(),
             generator_helpers: local_helpers.ts_helpers_of_kind(TsHelperKind::Generator),
@@ -176,6 +181,7 @@ impl AsyncHelperContext {
             &self.awaiter_helpers,
             &self.awaiter_namespaces,
             "__awaiter",
+            TsHelperKind::Awaiter,
         )
     }
 
@@ -185,6 +191,7 @@ impl AsyncHelperContext {
             &self.generator_helpers,
             &self.generator_namespaces,
             "__generator",
+            TsHelperKind::Generator,
         )
     }
 
@@ -194,6 +201,7 @@ impl AsyncHelperContext {
         helpers: &HashSet<BindingKey>,
         namespaces: &HashMap<BindingKey, HashSet<String>>,
         canonical_name: &str,
+        kind: TsHelperKind,
     ) -> bool {
         let Some(callee) = call
             .callee
@@ -210,7 +218,18 @@ impl AsyncHelperContext {
                             .unresolved_mark
                             .is_some_and(|mark| id.ctxt.outer() == mark))
             }
-            Expr::Member(_) => cross_module_ts_member_helper(callee, namespaces),
+            Expr::Member(_) => {
+                // `with` can replace either the namespace or the require
+                // binding at runtime, even when resolver identity matches.
+                if self.with_statement_present {
+                    return false;
+                }
+                cross_module_ts_member_helper(callee, namespaces)
+                    || tslib_member_ts_helper_kind(callee, &self.tslib_namespaces) == Some(kind)
+                    || self.unresolved_mark.is_some_and(|mark| {
+                        tslib_require_ts_helper_kind_with_mark(callee, mark) == Some(kind)
+                    })
+            }
             _ => false,
         }
     }
@@ -301,6 +320,7 @@ pub(crate) fn try_transform_ts_generator_body(
     reserved_names: &HashSet<Atom>,
 ) -> bool {
     let helpers = AsyncHelperContext {
+        tslib_namespaces: HashSet::new(),
         awaiter_helpers: HashSet::new(),
         awaiter_namespaces: HashMap::new(),
         generator_helpers: generator_helpers.iter().cloned().collect(),
