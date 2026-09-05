@@ -425,8 +425,8 @@ node scripts/repro/parameters-matrix/matrix.mjs --dump nested-default babel-7.8-
 
 ### Writing a new matrix
 
-Every matrix should spread `...mangleValidator()` from `lib/compare.mjs` into
-its `runMatrix()` config. This uses alpha-renaming normalization to compare
+By default, matrices should spread `...mangleValidator()` from
+`lib/compare.mjs` into their `runMatrix()` config. This uses alpha-renaming normalization to compare
 mangled shapes structurally rather than by substring needle matching — without
 it, correctly-recovered mangled shapes show as false negatives.
 
@@ -445,6 +445,14 @@ For snippets with legitimate structural variants in the output, add
 `acceptForms` with the alternative full-program forms. For snippets where the
 expected needle has multiple acceptable forms, use `expectedAny` (array of
 needle-arrays — passes if any group is fully present).
+
+The [tslib helper matrix](../scripts/repro/tslib-helpers-matrix/README.md)
+compares complete modules structurally for every profile, using the same
+alpha-renaming comparison after canonicalizing local export spelling. It
+tests module sources across inline helpers, CommonJS `importHelpers`
+namespaces, and ESM named imports. Script sources alone cannot test this
+dimension: TypeScript keeps helpers inline for scripts even when
+`importHelpers` is enabled. Known misses remain `no` rows in the baseline.
 
 ### Execution equivalence (`execute`)
 

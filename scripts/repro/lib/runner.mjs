@@ -935,6 +935,7 @@ process.stdout.write(JSON.stringify(results));
 
 export function tscBatch(sources, options = {}) {
   const target = options.target ?? "ES5";
+  const module = options.module ?? "ESNext";
   const version = options.version ?? "5";
   const toolName = version === "5" ? "typescript" : `typescript-${version}`;
   const toolDir = ensureNodeTool(toolName, [`typescript@${version}`]);
@@ -945,11 +946,18 @@ export function tscBatch(sources, options = {}) {
 const fs = require("node:fs");
 const ts = require("typescript");
 const target = process.env.MATRIX_TSC_TARGET || "ES5";
+const options = JSON.parse(process.env.MATRIX_TSC_OPTIONS || "{}");
 const sources = JSON.parse(fs.readFileSync(0, "utf8"));
 const results = sources.map(source => {
   try {
     return { code: ts.transpileModule(source, {
-      compilerOptions: { target: ts.ScriptTarget[target], module: ts.ModuleKind.ESNext },
+      compilerOptions: {
+        target: ts.ScriptTarget[target],
+        module: ts.ModuleKind[options.module || "ESNext"],
+        importHelpers: options.importHelpers ?? false,
+        downlevelIteration: options.downlevelIteration ?? false,
+        esModuleInterop: options.esModuleInterop ?? false,
+      },
     }).outputText };
   } catch (e) { return { error: e.message }; }
 });
@@ -958,7 +966,15 @@ process.stdout.write(JSON.stringify(results));
   );
   return runBatchHelperAsync("node", [helper], sources, {
     cwd: toolDir,
-    env: { MATRIX_TSC_TARGET: target },
+    env: {
+      MATRIX_TSC_TARGET: target,
+      MATRIX_TSC_OPTIONS: JSON.stringify({
+        module,
+        importHelpers: options.importHelpers,
+        downlevelIteration: options.downlevelIteration,
+        esModuleInterop: options.esModuleInterop,
+      }),
+    },
   });
 }
 

@@ -49,6 +49,7 @@ const matrices = [
   "parameters",
   "swc-minifier",
   "template-literal",
+  "tslib-helpers",
 ];
 
 function gitCommit() {
