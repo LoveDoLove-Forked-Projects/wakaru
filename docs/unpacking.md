@@ -81,6 +81,21 @@ JavaScript module graph; files emitted separately by ncc's asset relocation
 loader are not reconstructed by the unpacker. ncc's `.mjs` output uses a
 top-level runtime rather than this IIFE shape and is not structurally split.
 
+### Webpack 5 trailing startup calls
+
+A trailing IIFE is extracted as webpack's entry wrapper only when it occupies
+the whole startup region, optionally preceded by the standalone canonical
+`__webpack_exports__ = {}` anchor. Entry declarations and side effects before
+an authored trailing call remain in `entry.js`, including entry expressions
+merged into the last runtime sequence. Raw extraction uses the same boundary.
+
+Wrapper removal requires an anonymous synchronous, non-generator function or
+synchronous arrow, with no parameters or call arguments. Async and generator
+calls retain their invocation boundaries; an async IIFE must not turn into
+top-level await. Doing so would make module evaluation wait for an unawaited
+call and turn that call's rejection into a module-evaluation failure. This
+restriction applies to raw extraction as well as normal unpacking.
+
 ## Browserify and Cocos Creator
 
 Cocos Creator 2.x project-script bundles are treated as a Browserify dialect,

@@ -1710,7 +1710,7 @@ fn extract_webpack5_modules_with_plan(
     };
     let trailing_entry_body = direct_entry_id
         .is_none()
-        .then(|| extract_trailing_entry_body(bootstrap_body))
+        .then(|| extract_trailing_entry_body(bootstrap_body, &modules_sym, require_plan.as_ref()))
         .flatten();
     // Check for a trailing IIFE entry point. A directly invoked require
     // lifecycle is runtime machinery; its call argument identifies the real
@@ -1898,14 +1898,34 @@ fn normalize_extracted_webpack_entry_module(
 
 fn extract_trailing_entry_body(
     bootstrap_body: &swc_core::ecma::ast::FunctionBody,
+    modules_sym: &Atom,
+    require_plan: Option<&RequireFnPlan>,
 ) -> Option<Vec<Stmt>> {
-    bootstrap_body
+    // Most production entries are already inline. Avoid resolving/cloning
+    // their bootstrap again when there is no removable trailing call.
+    let candidate = bootstrap_body
         .stmts
         .iter()
         .rev()
-        .find(|stmt| !matches!(stmt, Stmt::Return(_)))
-        .and_then(extract_iife_stmt_body)
-        .map(|body| body.stmts.clone())
+        .find(|stmt| !matches!(stmt, Stmt::Return(_)))?;
+    extract_iife_stmt_body(candidate)?;
+
+    // A final IIFE is only the entry wrapper when it owns the entire startup
+    // region. Terser can inline an authored main() after imports or other
+    // entry statements; extracting only that call body would discard them.
+    let (startup, _) = extract_webpack5_startup_region(bootstrap_body, modules_sym, require_plan)?;
+    let entry_stmt = match startup.as_slice() {
+        [stmt] => stmt,
+        [anchor, stmt]
+            if empty_object_anchor(anchor).is_some_and(|(binding, var)| {
+                binding == "__webpack_exports__" && var.decls.len() == 1
+            }) =>
+        {
+            stmt
+        }
+        _ => return None,
+    };
+    extract_iife_stmt_body(entry_stmt).map(|body| body.stmts.clone())
 }
 
 struct NccInlineEntry {
@@ -1979,6 +1999,67 @@ fn extract_webpack5_inline_startup(
     modules_sym: &Atom,
     require_plan: Option<&RequireFnPlan>,
 ) -> Option<Webpack5InlineStartup> {
+    let (entry_region, require_sym) =
+        extract_webpack5_startup_region(bootstrap_body, modules_sym, require_plan)?;
+
+    // The anchor, when present, is the *first* statement of the startup section
+    // (webpack emits it immediately after the runtime). Position and `{}` shape
+    // are not enough to treat it as the exports object: when a minifier has
+    // dropped the real anchor, an ordinary entry local such as `const app = {}`
+    // is the first statement instead, and renaming it to `exports` (plus
+    // dropping its declaration) corrupts the entry.
+    let (body_stmts, exports_sym) = match empty_object_anchor(&entry_region[0]) {
+        Some((binding, var_decl)) => {
+            // The region with the empty-object declarator removed.
+            let mut without_anchor: Vec<Stmt> = Vec::new();
+            if var_decl.decls.len() > 1 {
+                let mut rest = var_decl.clone();
+                rest.decls.remove(0);
+                without_anchor.push(Stmt::Decl(swc_core::ecma::ast::Decl::Var(Box::new(rest))));
+            }
+            without_anchor.extend(entry_region[1..].iter().cloned());
+
+            let evidence = anchor_export_helper_evidence(&entry_region, &require_sym, &binding);
+            if evidence.helper && !evidence.other_uses {
+                // Real exports anchor (`require.r(binding)` / `require.d(binding,
+                // ...)`): drop the declaration and rename the binding to
+                // `exports` so the export helpers are recovered.
+                (without_anchor, Some(binding))
+            } else if !stmts_reference_ident(&without_anchor, &binding) {
+                // A dead `__webpack_exports__ = {}` (app entries with no
+                // exports): drop the inert declaration, but do not rename.
+                (without_anchor, None)
+            } else {
+                // An ordinary entry local that happens to be `{}` first, or a
+                // library anchor a wrapper tail still consumes (`module.exports
+                // = t`) — dropping its declaration would break that use: keep
+                // the whole region untouched.
+                (entry_region.clone(), None)
+            }
+        }
+        None => (entry_region.clone(), None),
+    };
+
+    // Require the recovered entry to actually call the require binding so a
+    // bundle with no startup does not synthesize a bogus entry.
+    if body_stmts.is_empty() || !stmts_call_require(&body_stmts, &require_sym) {
+        return None;
+    }
+    Some(Webpack5InlineStartup {
+        body_stmts,
+        require_sym,
+        exports_sym,
+    })
+}
+
+/// Recover the complete startup region before choosing whether a trailing
+/// wrapper can be removed. Both entry paths must agree on the runtime boundary,
+/// including entry expressions merged into the final runtime sequence.
+fn extract_webpack5_startup_region(
+    bootstrap_body: &swc_core::ecma::ast::FunctionBody,
+    modules_sym: &Atom,
+    require_plan: Option<&RequireFnPlan>,
+) -> Option<(Vec<Stmt>, Atom)> {
     // Reuse the lifecycle plan that gated detection. Keep the loose fallback
     // for callers that do not already carry a plan.
     let (require_idx, require_sym) = match require_plan {
@@ -2064,54 +2145,7 @@ fn extract_webpack5_inline_startup(
         return None;
     }
 
-    // The anchor, when present, is the *first* statement of the startup section
-    // (webpack emits it immediately after the runtime). Position and `{}` shape
-    // are not enough to treat it as the exports object: when a minifier has
-    // dropped the real anchor, an ordinary entry local such as `const app = {}`
-    // is the first statement instead, and renaming it to `exports` (plus
-    // dropping its declaration) corrupts the entry.
-    let (body_stmts, exports_sym) = match empty_object_anchor(&entry_region[0]) {
-        Some((binding, var_decl)) => {
-            // The region with the empty-object declarator removed.
-            let mut without_anchor: Vec<Stmt> = Vec::new();
-            if var_decl.decls.len() > 1 {
-                let mut rest = var_decl.clone();
-                rest.decls.remove(0);
-                without_anchor.push(Stmt::Decl(swc_core::ecma::ast::Decl::Var(Box::new(rest))));
-            }
-            without_anchor.extend(entry_region[1..].iter().cloned());
-
-            let evidence = anchor_export_helper_evidence(&entry_region, &require_sym, &binding);
-            if evidence.helper && !evidence.other_uses {
-                // Real exports anchor (`require.r(binding)` / `require.d(binding,
-                // ...)`): drop the declaration and rename the binding to
-                // `exports` so the export helpers are recovered.
-                (without_anchor, Some(binding))
-            } else if !stmts_reference_ident(&without_anchor, &binding) {
-                // A dead `__webpack_exports__ = {}` (app entries with no
-                // exports): drop the inert declaration, but do not rename.
-                (without_anchor, None)
-            } else {
-                // An ordinary entry local that happens to be `{}` first, or a
-                // library anchor a wrapper tail still consumes (`module.exports
-                // = t`) — dropping its declaration would break that use: keep
-                // the whole region untouched.
-                (entry_region.clone(), None)
-            }
-        }
-        None => (entry_region.clone(), None),
-    };
-
-    // Require the recovered entry to actually call the require binding so a
-    // bundle with no startup does not synthesize a bogus entry.
-    if body_stmts.is_empty() || !stmts_call_require(&body_stmts, &require_sym) {
-        return None;
-    }
-    Some(Webpack5InlineStartup {
-        body_stmts,
-        require_sym,
-        exports_sym,
-    })
+    Some((entry_region, require_sym))
 }
 
 /// If `stmt` begins with an empty-object declarator (`var x = {}` — webpack's
@@ -2380,7 +2414,7 @@ fn find_inline_runtime_boundary(
         .map(|idx| (idx, None))
         .or_else(|| find_first_executed_startup(stmts, scan_from, require_id));
 
-    if let Some((startup_stmt_idx, startup_seq_idx)) = first_startup {
+    let stmt_idx = if let Some((startup_stmt_idx, startup_seq_idx)) = first_startup {
         if let Some(startup_expr_idx) = startup_seq_idx {
             let Stmt::Expr(stmt) = &stmts[startup_stmt_idx] else {
                 unreachable!("sequence startup point must belong to an expression statement");
@@ -2398,21 +2432,20 @@ fn find_inline_runtime_boundary(
             }
         }
 
-        return stmts[scan_from..startup_stmt_idx]
+        stmts[scan_from..startup_stmt_idx]
             .iter()
             .rposition(|stmt| contains_runtime_require_assignment(stmt, require_id))
-            .map(|offset| RuntimeBoundary {
-                stmt_idx: scan_from + offset,
-                seq_expr_idx: None,
-            });
-    }
-
-    // No eagerly evaluated loader use was found. Retain the previous fallback
-    // for deferred startup shapes whose require call lives in a callback.
-    let stmt_idx = stmts[scan_from..]
-        .iter()
-        .rposition(|stmt| contains_runtime_require_assignment(stmt, require_id))
-        .map(|offset| scan_from + offset)?;
+            .map(|offset| scan_from + offset)?
+    } else {
+        // No eagerly evaluated loader use was found. Retain the previous
+        // fallback for deferred startup shapes whose require call lives in a callback.
+        stmts[scan_from..]
+            .iter()
+            .rposition(|stmt| contains_runtime_require_assignment(stmt, require_id))
+            .map(|offset| scan_from + offset)?
+    };
+    // Even when the first loader call is in a later statement, a runtime
+    // sequence can already end with entry effects: `r.o = ..., recordStartup()`.
     let seq_expr_idx = match &stmts[stmt_idx] {
         Stmt::Expr(stmt) => match strip_parens(&stmt.expr) {
             Expr::Seq(seq) => last_runtime_require_assign_in_exprs(&seq.exprs, require_id),
@@ -3390,34 +3423,37 @@ fn extract_iife_stmt_body(stmt: &Stmt) -> Option<&swc_core::ecma::ast::FunctionB
 }
 
 fn extract_iife_body(expr: &Expr) -> Option<&swc_core::ecma::ast::FunctionBody> {
-    match expr {
-        Expr::Call(call) => extract_callee_body(&call.callee),
-        Expr::Unary(unary) if matches!(unary.op, swc_core::ecma::ast::UnaryOp::Bang) => {
-            let Expr::Call(call) = &*unary.arg else {
+    let call = match strip_parens(expr) {
+        Expr::Call(call) => call,
+        Expr::Unary(unary) if unary.op == UnaryOp::Bang => {
+            let Expr::Call(call) = strip_parens(&unary.arg) else {
                 return None;
             };
-            extract_callee_body(&call.callee)
+            call
         }
-        _ => None,
+        _ => return None,
+    };
+    // Extraction removes the call itself. It must not discard argument
+    // evaluation or turn an async/generator invocation into module execution.
+    if !call.args.is_empty() {
+        return None;
     }
+    extract_callee_body(&call.callee)
 }
 
 fn extract_callee_body(callee: &Callee) -> Option<&swc_core::ecma::ast::FunctionBody> {
     let Callee::Expr(callee_expr) = callee else {
         return None;
     };
-    match &**callee_expr {
-        Expr::Fn(FnExpr { function, .. }) => function.body.as_ref(),
-        Expr::Arrow(arrow) => match &*arrow.body {
-            swc_core::ecma::ast::ArrowFunctionBody::FunctionBody(body) => Some(body),
-            _ => None,
-        },
-        Expr::Paren(paren) => match &*paren.expr {
-            Expr::Fn(FnExpr { function, .. }) => function.body.as_ref(),
-            Expr::Arrow(arrow) => match &*arrow.body {
-                swc_core::ecma::ast::ArrowFunctionBody::FunctionBody(body) => Some(body),
-                _ => None,
-            },
+    match strip_parens(callee_expr) {
+        Expr::Fn(FnExpr {
+            ident: None,
+            function,
+        }) if !function.is_async && !function.is_generator && function.params.is_empty() => {
+            function.body.as_ref()
+        }
+        Expr::Arrow(arrow) if !arrow.is_async && arrow.params.is_empty() => match &*arrow.body {
+            ArrowFunctionBody::FunctionBody(body) => Some(body),
             _ => None,
         },
         _ => None,

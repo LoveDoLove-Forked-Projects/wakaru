@@ -118,6 +118,10 @@ webpack5_5_106 --config webpack5-prod.config.cjs 2>/dev/null
 echo "  wp5-cjs-min:       CJS-only modules (production, minified)"
 webpack5_5_106 --config webpack5-cjs-min.config.cjs 2>/dev/null
 
+echo "  wp5-trailing-iife-min: User main() inlined after three entry dependencies (5.101.3)"
+npx --yes -p webpack@5.101.3 -p webpack-cli@6.0.1 webpack \
+  --config webpack5-trailing-iife-min.config.cjs 2>/dev/null
+
 echo "  wp5-umd-min:       CJS-only modules wrapped as a minified UMD library"
 webpack5_5_106 --config webpack5-umd-min.config.cjs 2>/dev/null
 

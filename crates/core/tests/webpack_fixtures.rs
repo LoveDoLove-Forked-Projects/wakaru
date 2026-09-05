@@ -765,3 +765,51 @@ fn wp5_umd_min_entry_is_a_valid_module() {
         entry.1
     );
 }
+
+#[test]
+fn wp5_trailing_user_iife_keeps_entry_dependencies_and_async_boundary() {
+    // webpack 5.101.3 production output: Terser inlines main() into a
+    // trailing async IIFE after three entry-scope require declarations.
+    let source = fixture("wp5-trailing-iife-min/bundle.js");
+    let raw = unpack_raw(&source, &DecompileOptions::default())
+        .expect("generated webpack bundle should unpack");
+    let raw_entry = &raw
+        .modules
+        .iter()
+        .find(|(name, _)| name == "entry.js")
+        .expect("entry")
+        .1;
+    for dependency in ["module-891.js", "module-878.js", "module-783.js"] {
+        assert!(
+            raw_entry.contains(dependency),
+            "lost entry dependency {dependency}: {}",
+            raw_entry
+        );
+    }
+    assert!(
+        raw_entry.contains("async"),
+        "async invocation must survive raw extraction: {}",
+        raw_entry
+    );
+    for source_map in [false, true] {
+        let pairs = unpack_fixture_with_options("wp5-trailing-iife-min/bundle.js", source_map);
+        assert_eq!(pairs.len(), 4);
+        let entry = &pairs
+            .iter()
+            .find(|(name, _)| name == "entry.js")
+            .expect("entry")
+            .1;
+        for dependency in ["module-891.js", "module-878.js", "module-783.js"] {
+            assert!(
+                entry.contains(dependency),
+                "lost entry dependency {dependency}: {entry}"
+            );
+        }
+        assert!(
+            entry.contains("async"),
+            "fire-and-forget call must not become top-level await: {entry}"
+        );
+        assert!(entry.contains("document.body.innerHTML"), "{entry}");
+        assert_eq!(validate_output_modules(&pairs), vec![]);
+    }
+}
