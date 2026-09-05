@@ -223,6 +223,7 @@ fn collect_ts_helper_from_var_decl(
 pub(crate) fn tslib_helper_name_kind(name: &str) -> Option<TranspilerHelperKind> {
     match name {
         "__assign" => Some(TranspilerHelperKind::Extends),
+        "__makeTemplateObject" => Some(TranspilerHelperKind::TaggedTemplateLiteral),
         "__rest" => Some(TranspilerHelperKind::ObjectWithoutProperties),
         "__read" => Some(TranspilerHelperKind::SlicedToArray),
         "__importDefault" => Some(TranspilerHelperKind::InteropRequireDefault),

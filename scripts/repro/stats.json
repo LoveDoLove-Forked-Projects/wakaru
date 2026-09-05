@@ -1,10 +1,10 @@
 {
-  "commit": "fa2d16c6",
+  "commit": "afb303b2",
   "date": "2026-09-05",
   "aggregate": {
-    "yes": 1876,
+    "yes": 1880,
     "total": 1969,
-    "pct": 95.3
+    "pct": 95.5
   },
   "matrices": [
     {
@@ -105,11 +105,11 @@
     },
     {
       "name": "tslib-helpers",
-      "yes": 72,
-      "no": 39,
+      "yes": 76,
+      "no": 35,
       "error": 0,
       "total": 111,
-      "pct": 64.9
+      "pct": 68.5
     }
   ]
 }

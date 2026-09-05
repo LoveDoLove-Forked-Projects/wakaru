@@ -53,11 +53,10 @@ runtime compatibility. The script-only execution harness cannot run these
 modules; no `execute` check is claimed. The matrix does not install or execute
 tslib itself. Runtime behavior tests remain separate from this recovery score.
 
-The initial baseline has **72 yes / 39 no / 0 errors across 111 distinct
+The current baseline has **76 yes / 35 no / 0 errors across 111 distinct
 shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
 
 - Generator delegation leaves namespace `__values` calls behind.
-- Tagged templates miss namespace calls and mangled named aliases.
 - External private-field helpers remain; mangled inline helpers also remain.
 - Compressed object-rest and array-destructuring cases do not fully recover.
 - Inheritance recovery retains its IIFE when members still capture the
@@ -65,6 +64,7 @@ shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
 - Some current inline interop helper bodies are not recognized.
 
 The original tslib awaiter regression passes all 18 ES5/ES2015 profiles.
+Tagged templates now pass across inline, namespace, and named-import profiles.
 Fixes should turn their failing shapes into `yes`; regenerate `stats.json`
 and its README/website aggregate when measured numbers change. A falling
 aggregate after adding challenge rows does not mean existing recovery regressed.

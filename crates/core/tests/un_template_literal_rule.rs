@@ -618,3 +618,73 @@ var b = `${prefix}/users/${id}`;
     let output = apply(input);
     assert_eq_normalized(&output, expected);
 }
+
+#[test]
+fn tslib_template_helpers_restore_across_delivery_forms() {
+    for (prefix, helper) in [
+        ("import * as ts from 'tslib';", "ts.__makeTemplateObject"),
+        ("var ts = require('tslib');", "ts.__makeTemplateObject"),
+        ("import { __makeTemplateObject as h } from 'tslib';", "h"),
+        ("var h = require('tslib').__makeTemplateObject;", "h"),
+        ("", "require('tslib').__makeTemplateObject"),
+    ] {
+        let input = format!(
+            "{prefix} var cache; function show(value) {{ return tag(cache || (cache = {helper}(['hello ', ''], ['hello ', ''])), value); }}"
+        );
+        for output in [apply(&input), render(&input)] {
+            assert!(output.contains("tag`hello ${value}`"), "{output}");
+        }
+    }
+}
+
+#[test]
+fn tslib_template_namespace_shadowing_preserves_user_calls() {
+    let input = r#"
+import * as ts from "tslib";
+function show(ts, value) {
+    return tag(ts.__makeTemplateObject(["hello ", ""], ["hello ", ""]), value);
+}
+"#;
+    assert!(render(input).contains("ts.__makeTemplateObject("));
+}
+
+#[test]
+fn tslib_template_shadowed_require_preserves_user_calls() {
+    let input = r#"
+function show(require, value) {
+    return tag(require("tslib").__makeTemplateObject(["hello ", ""], ["hello ", ""]), value);
+}
+"#;
+    assert!(render(input).contains(".__makeTemplateObject("));
+}
+
+#[test]
+fn tslib_template_factory_restores_raw_segments() {
+    let input = r#"
+import * as ts from "tslib";
+function data() {
+    const strings = ts.__makeTemplateObject(["line\n", ""], ["line\\n", ""]);
+    data = function() { return strings; };
+    return strings;
+}
+var result = tag(data(), value);
+"#;
+    assert!(apply(input).contains("tag`line\\n${value}`"));
+}
+
+#[test]
+fn tslib_template_dynamic_lookup_and_spread_arguments_are_preserved() {
+    let input = r#"
+var ts = require("tslib");
+with (scope) {
+    tag(ts.__makeTemplateObject(["hello"], ["hello"]));
+}
+tag(ts.__makeTemplateObject(...args));
+"#;
+    let output = apply(input);
+    assert!(output.contains(".__makeTemplateObject(["), "{output}");
+    assert!(
+        output.contains(".__makeTemplateObject(...args)"),
+        "{output}"
+    );
+}

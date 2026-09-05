@@ -68,16 +68,11 @@ impl<'a> UnTemplateLiteral<'a> {
                 })
             })
             .unwrap_or_default();
-        let detected_helpers: HashSet<BindingKey> = local_helpers
-            .helpers_of_kind(TranspilerHelperKind::TaggedTemplateLiteral)
-            .into_keys()
-            .collect();
-        let factories =
-            collect_template_factories(module, &cross_module_helpers, &detected_helpers);
+        let factories = collect_template_factories(module, &cross_module_helpers, local_helpers);
         let mut replacer = TaggedTemplateReplacer {
             factories: &factories,
             cross_module_helpers: &cross_module_helpers,
-            detected_helpers: &detected_helpers,
+            local_helpers,
             consumed_helpers: HashSet::new(),
             consumed_caches: HashSet::new(),
             consumed_factories: HashSet::new(),
@@ -143,13 +138,17 @@ impl VisitMut for UnTemplateLiteral<'_> {
 struct TaggedTemplateReplacer<'a> {
     factories: &'a HashMap<BindingKey, TemplateData>,
     cross_module_helpers: &'a CrossModuleHelperRefs,
-    detected_helpers: &'a HashSet<BindingKey>,
+    local_helpers: &'a LocalHelperContext,
     consumed_helpers: HashSet<BindingKey>,
     consumed_caches: HashSet<BindingKey>,
     consumed_factories: HashSet<BindingKey>,
 }
 
 impl VisitMut for TaggedTemplateReplacer<'_> {
+    fn visit_mut_with_stmt(&mut self, _stmt: &mut swc_core::ecma::ast::WithStmt) {
+        // Dynamic lookup can override even a resolver-proven helper binding.
+    }
+
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
         expr.visit_mut_children_with(self);
 
@@ -160,7 +159,7 @@ impl VisitMut for TaggedTemplateReplacer<'_> {
             call,
             self.factories,
             self.cross_module_helpers,
-            self.detected_helpers,
+            self.local_helpers,
             &mut self.consumed_helpers,
             &mut self.consumed_caches,
             &mut self.consumed_factories,
@@ -240,7 +239,7 @@ fn rewrite_tagged_template_call(
     call: &CallExpr,
     factories: &HashMap<BindingKey, TemplateData>,
     cross_module_helpers: &CrossModuleHelperRefs,
-    detected_helpers: &HashSet<BindingKey>,
+    local_helpers: &LocalHelperContext,
     consumed_helpers: &mut HashSet<BindingKey>,
     consumed_caches: &mut HashSet<BindingKey>,
     consumed_factories: &mut HashSet<BindingKey>,
@@ -253,7 +252,7 @@ fn rewrite_tagged_template_call(
         call.args[0].expr.as_ref(),
         factories,
         cross_module_helpers,
-        detected_helpers,
+        local_helpers,
     )?;
     if template_match.data.cooked.len() != call.args.len() {
         return None;
@@ -294,12 +293,12 @@ fn extract_template_match(
     expr: &Expr,
     factories: &HashMap<BindingKey, TemplateData>,
     cross_module_helpers: &CrossModuleHelperRefs,
-    detected_helpers: &HashSet<BindingKey>,
+    local_helpers: &LocalHelperContext,
 ) -> Option<TemplateMatch> {
     let expr = strip_parens(expr);
 
     if let Some((data, helper)) =
-        extract_direct_template_helper_call(expr, cross_module_helpers, detected_helpers)
+        extract_direct_template_helper_call(expr, cross_module_helpers, local_helpers)
     {
         return Some(TemplateMatch {
             data: TemplateData { helper, ..data },
@@ -342,7 +341,7 @@ fn extract_template_match(
     let (data, helper) = extract_direct_template_helper_call(
         strip_parens(&assign.right),
         cross_module_helpers,
-        detected_helpers,
+        local_helpers,
     )?;
 
     Some(TemplateMatch {
@@ -374,7 +373,7 @@ fn extract_template_factory_call<'a>(
 fn extract_direct_template_helper_call(
     expr: &Expr,
     cross_module_helpers: &CrossModuleHelperRefs,
-    detected_helpers: &HashSet<BindingKey>,
+    local_helpers: &LocalHelperContext,
 ) -> Option<(TemplateData, Option<BindingKey>)> {
     let Expr::Call(call) = expr else {
         return None;
@@ -392,13 +391,16 @@ fn extract_direct_template_helper_call(
             if let Some(helper) = expr_binding_key(callee) {
                 if !is_template_helper_name(helper.0.as_ref())
                     && !cross_module_helpers.direct.contains_key(&helper)
-                    && !detected_helpers.contains(&helper)
+                    && !local_helpers
+                        .is_helper_callee(callee, TranspilerHelperKind::TaggedTemplateLiteral)
                 {
                     return None;
                 }
                 Some(helper)
             } else if cross_module_member_helper_kind(callee, &cross_module_helpers.namespaces)
                 == Some(TranspilerHelperKind::TaggedTemplateLiteral)
+                || local_helpers
+                    .is_helper_callee(callee, TranspilerHelperKind::TaggedTemplateLiteral)
                 || is_inline_template_helper(callee)
             {
                 None
@@ -651,7 +653,7 @@ fn normalize_newline_escapes(raw: &str) -> Option<String> {
 fn collect_template_factories(
     module: &Module,
     cross_module_helpers: &CrossModuleHelperRefs,
-    detected_helpers: &HashSet<BindingKey>,
+    local_helpers: &LocalHelperContext,
 ) -> HashMap<BindingKey, TemplateData> {
     module
         .body
@@ -664,7 +666,7 @@ fn collect_template_factories(
             let data = extract_template_from_factory_body(
                 &body.stmts,
                 cross_module_helpers,
-                detected_helpers,
+                local_helpers,
             )?;
             Some((binding_key(&func.ident), data))
         })
@@ -674,7 +676,7 @@ fn collect_template_factories(
 fn extract_template_from_factory_body(
     stmts: &[Stmt],
     cross_module_helpers: &CrossModuleHelperRefs,
-    detected_helpers: &HashSet<BindingKey>,
+    local_helpers: &LocalHelperContext,
 ) -> Option<TemplateData> {
     let mut locals: HashMap<BindingKey, TemplateData> = HashMap::new();
 
@@ -691,7 +693,7 @@ fn extract_template_from_factory_body(
                     if let Some((data, helper)) = extract_direct_template_helper_call(
                         init,
                         cross_module_helpers,
-                        detected_helpers,
+                        local_helpers,
                     ) {
                         locals.insert(key, TemplateData { helper, ..data });
                     }
@@ -705,7 +707,7 @@ fn extract_template_from_factory_body(
                     }
                 }
                 if let Some((data, helper)) =
-                    extract_direct_template_helper_call(arg, cross_module_helpers, detected_helpers)
+                    extract_direct_template_helper_call(arg, cross_module_helpers, local_helpers)
                 {
                     return Some(TemplateData { helper, ..data });
                 }
