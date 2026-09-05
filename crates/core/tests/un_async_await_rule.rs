@@ -2761,3 +2761,83 @@ fn tslib_namespace_members_preserve_with_lookup() {
         assert_eq_normalized(&apply_without_helpers(&input), &input);
     }
 }
+
+#[test]
+fn delegated_values_restore_across_tslib_delivery_forms() {
+    for (prefix, values) in [
+        ("import * as ts from 'tslib';", "ts.__values"),
+        ("var ts = require('tslib');", "ts.__values"),
+        ("import { __values as v } from 'tslib';", "v"),
+        ("", "require('tslib').__values"),
+    ] {
+        let input = format!(
+            "{prefix} function read(items) {{ return __generator(this, function(state) {{ return [5, {values}(items)]; }}); }}"
+        );
+        let output = apply(&input);
+        assert!(output.contains("yield* items"), "{output}");
+    }
+}
+
+#[test]
+fn delegated_values_preserve_unknown_calls_and_argument_effects() {
+    for (params, value) in [
+        ("items, __values", "__values(items)"),
+        ("items, require", "require('tslib').__values(items)"),
+        ("items, ts", "ts.__values(items)"),
+        ("items", "ts.__values(items, effect())"),
+        ("items", "ts.__values(...items)"),
+    ] {
+        let input = format!(
+            "import * as ts from 'tslib'; function read({params}) {{ return __generator(this, function(state) {{ return [5, {value}]; }}); }}"
+        );
+        let output = apply(&input);
+        assert!(!output.contains("yield* items;"), "{output}");
+        assert!(
+            output.contains(".__values(") || output.contains("yield* __values("),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn delegated_values_preserve_reassigned_helpers() {
+    for (prefix, value) in [
+        ("var v = require('tslib').__values; v = custom;", "v"),
+        ("var ts = require('tslib'); ts = custom;", "ts.__values"),
+    ] {
+        let input = format!(
+            "{prefix} function read(items) {{ return __generator(this, function(state) {{ return [5, {value}(items)]; }}); }}"
+        );
+        assert!(!apply(&input).contains("yield* items;"));
+    }
+}
+
+#[test]
+fn delegated_values_use_cross_module_namespace_facts() {
+    let mut facts = ModuleFactsMap::new();
+    facts.insert(
+        "helpers.js",
+        ModuleFacts {
+            ts_helper_exports: vec![
+                TypeScriptHelperExportFact {
+                    exported: "g".into(),
+                    local: Some("g".into()),
+                    kind: TypeScriptHelperKind::Generator,
+                },
+                TypeScriptHelperExportFact {
+                    exported: "v".into(),
+                    local: Some("v".into()),
+                    kind: TypeScriptHelperKind::Values,
+                },
+            ],
+            ..Default::default()
+        },
+    );
+    let input = r#"
+import * as h from "./helpers.js";
+function read(items) {
+    return h.g(this, function(state) { return [5, h.v(items)]; });
+}
+"#;
+    assert!(apply_cross_module_facts(input, &facts).contains("yield* items"));
+}

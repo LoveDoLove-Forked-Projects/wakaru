@@ -112,6 +112,7 @@ struct AsyncHelperContext {
     generator_helpers: HashSet<BindingKey>,
     generator_namespaces: HashMap<BindingKey, HashSet<String>>,
     values_helpers: HashSet<BindingKey>,
+    values_namespaces: HashMap<BindingKey, HashSet<String>>,
     unresolved_mark: Option<Mark>,
     /// Bindings written anywhere in the module (assignments, updates,
     /// destructuring and for-in/of targets). A thisArg alias that is written
@@ -138,6 +139,7 @@ impl AsyncHelperContext {
             generator_helpers: local_helpers.ts_helpers_of_kind(TsHelperKind::Generator),
             generator_namespaces: HashMap::new(),
             values_helpers: local_helpers.ts_helpers_of_kind(TsHelperKind::Values),
+            values_namespaces: HashMap::new(),
             unresolved_mark,
             written_bindings: HashSet::new(),
             with_statement_present: false,
@@ -173,6 +175,15 @@ impl AsyncHelperContext {
         );
         self.generator_helpers.extend(generator.direct);
         self.generator_namespaces.extend(generator.namespaces);
+
+        let values = collect_cross_module_ts_helper_refs(
+            module,
+            module_facts,
+            current_filename,
+            TypeScriptHelperKind::Values,
+        );
+        self.values_helpers.extend(values.direct);
+        self.values_namespaces.extend(values.namespaces);
     }
 
     fn is_awaiter_call(&self, call: &swc_core::ecma::ast::CallExpr) -> bool {
@@ -326,6 +337,7 @@ pub(crate) fn try_transform_ts_generator_body(
         generator_helpers: generator_helpers.iter().cloned().collect(),
         generator_namespaces: HashMap::new(),
         values_helpers: HashSet::new(),
+        values_namespaces: HashMap::new(),
         unresolved_mark: None,
         written_bindings: HashSet::new(),
         with_statement_present: false,
@@ -431,8 +443,8 @@ fn extract_generator_stmts(stmt: Stmt, helpers: &AsyncHelperContext) -> Option<E
         }
     }
     let decoded = match state_stmt? {
-        Stmt::Switch(sw) => decode_state_machine(state_name, sw.cases, &helpers.values_helpers)?,
-        Stmt::Return(ret) => decode_return_opcode(&Stmt::Return(ret), &helpers.values_helpers)?
+        Stmt::Switch(sw) => decode_state_machine(state_name, sw.cases, helpers)?,
+        Stmt::Return(ret) => decode_return_opcode(&Stmt::Return(ret), helpers)?
             .into_iter()
             .collect(),
         _ => unreachable!("state_stmt is restricted above"),
@@ -942,7 +954,7 @@ fn unwrap_seq_last(expr: &Expr) -> &Expr {
 fn decode_state_machine(
     state_name: Atom,
     cases: Vec<SwitchCase>,
-    values_helpers: &HashSet<BindingKey>,
+    helpers: &AsyncHelperContext,
 ) -> Option<Vec<Stmt>> {
     let mut trys: Vec<[Option<usize>; 4]> = Vec::new();
     // (label_idx, stmt) pairs
@@ -965,13 +977,9 @@ fn decode_state_machine(
                 continue;
             }
 
-            if let Some(decoded) = decode_return_opcode_with_backedge(
-                stmt,
-                values_helpers,
-                idx,
-                next_case_label,
-                &trys,
-            ) {
+            if let Some(decoded) =
+                decode_return_opcode_with_backedge(stmt, helpers, idx, next_case_label, &trys)
+            {
                 if let Some(s) = decoded {
                     flat.push((idx, s));
                 }
@@ -1345,15 +1353,15 @@ fn is_state_label_assign(state_name: &Atom, stmt: &Stmt) -> bool {
 
 /// Returns `Some(Some(stmt))` if an opcode-based return was decoded,
 /// `Some(None)` to drop the statement, or `None` if not a return opcode.
-fn decode_return_opcode(stmt: &Stmt, values_helpers: &HashSet<BindingKey>) -> Option<Option<Stmt>> {
-    decode_return_opcode_with_backedge(stmt, values_helpers, 0, None, &[])
+fn decode_return_opcode(stmt: &Stmt, helpers: &AsyncHelperContext) -> Option<Option<Stmt>> {
+    decode_return_opcode_with_backedge(stmt, helpers, 0, None, &[])
 }
 
 /// Like `decode_return_opcode`, but preserves non-fallthrough goto opcodes so
 /// shared state-machine recovery can reconstruct loops and structured branches.
 fn decode_return_opcode_with_backedge(
     stmt: &Stmt,
-    values_helpers: &HashSet<BindingKey>,
+    helpers: &AsyncHelperContext,
     current_case: usize,
     next_case_label: Option<usize>,
     trys: &[[Option<usize>; 4]],
@@ -1429,7 +1437,7 @@ fn decode_return_opcode_with_backedge(
         5 => {
             // yield*(value)
             let expr = argument
-                .map(|a| unwrap_ts_values(a, values_helpers))
+                .map(|a| unwrap_ts_values(a, helpers))
                 .unwrap_or_else(|| {
                     Box::new(Expr::Ident(Ident::new_no_ctxt(
                         "undefined".into(),
@@ -1450,26 +1458,40 @@ fn decode_return_opcode_with_backedge(
     }
 }
 
-fn unwrap_ts_values(expr: Box<Expr>, values_helpers: &HashSet<BindingKey>) -> Box<Expr> {
+fn unwrap_ts_values(expr: Box<Expr>, helpers: &AsyncHelperContext) -> Box<Expr> {
     let Expr::Call(call) = expr.as_ref() else {
         return expr;
     };
+    if call.args.len() != 1 || call.args[0].spread.is_some() || helpers.with_statement_present {
+        return expr;
+    }
     let Some(callee) = call.callee.as_expr() else {
         return expr;
     };
-    let Expr::Ident(id) = callee.as_ref() else {
-        return expr;
+    let lookup = match strip_parens(callee) {
+        Expr::Ident(id) => Some(id),
+        Expr::Member(member) => match strip_parens(&member.obj) {
+            Expr::Ident(id) => Some(id),
+            _ => None,
+        },
+        _ => None,
     };
-    // Match either a detected `__values` / `_ts_values` binding (robust to
-    // minified aliases) or the canonical helper names.
-    let is_values_helper = values_helpers.contains(&binding_key(id))
-        || matches!(id.sym.as_ref(), "__values" | "_ts_values");
+    if lookup.is_some_and(|id| helpers.written_bindings.contains(&binding_key(id))) {
+        return expr;
+    }
+    let is_values_helper = helpers.matches_helper_call(
+        call,
+        &helpers.values_helpers,
+        &helpers.values_namespaces,
+        "__values",
+        TsHelperKind::Values,
+    ) || call.callee.as_expr().is_some_and(|callee| {
+        matches!(strip_parens(callee), Expr::Ident(id)
+            if id.sym.as_ref() == "_ts_values"
+                && helpers.unresolved_mark.is_some_and(|mark| id.ctxt.outer() == mark))
+    });
     if is_values_helper {
-        return call
-            .args
-            .first()
-            .map(|arg| arg.expr.clone())
-            .unwrap_or(expr);
+        return call.args[0].expr.clone();
     }
     expr
 }

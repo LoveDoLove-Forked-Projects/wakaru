@@ -163,6 +163,11 @@ because it can override those lookups. The same callee checks drive generator
 decoding and rollback, so a mixed alias/member wrapper cannot lose its awaiter
 while returning an undecoded generator iterator.
 
+Generator delegation carries the same context into the `__values` decoder,
+including cross-module namespace facts. It removes only a one-argument,
+non-spread call to a proven helper (or an unresolved canonical name), and
+preserves dynamic lookup and reassigned helper bindings.
+
 Helper utilities include `LocalHelperContext::helpers_of_kind()` (filter by kind), `remove_helper_declarations()` (delete the helper function), `helpers_with_remaining_refs()` (check if a helper binding is still referenced elsewhere), and TS cleanup helpers such as `remove_unused_inline_ts_helpers()` / `remove_unused_ts_helper_bindings()`.
 
 `collect_module_facts()` records two helper export channels:
