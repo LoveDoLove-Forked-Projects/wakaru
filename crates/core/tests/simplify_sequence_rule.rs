@@ -734,6 +734,47 @@ assert.throws(Test262Error, function() {
 }
 
 #[test]
+fn preserves_nested_new_on_async_function_expression() {
+    // `new` on a non-constructible callee throws a TypeError even when the
+    // enclosing expression's value is unused.
+    let input = r#"
+[new async function() {}];
+"#;
+    assert_eq_normalized(&apply(input), input);
+    assert_eq_normalized(&apply_minimal(input), input);
+}
+
+#[test]
+fn preserves_nested_new_on_generator_function_expression() {
+    let input = r#"
+[new function*() {}];
+"#;
+    assert_eq_normalized(&apply(input), input);
+    assert_eq_normalized(&apply_minimal(input), input);
+}
+
+#[test]
+fn preserves_deeply_nested_new_on_non_constructible_callee() {
+    let input = r#"
+[[new (async function*() {})]];
+"#;
+    let expected = r#"
+[[new async function*() {}]];
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
+
+#[test]
+fn drops_nested_new_on_empty_plain_function_expression() {
+    // Control: `new` on an empty plain function expression stays droppable.
+    let input = r#"
+[new function() {}];
+"#;
+    let output = apply(input);
+    assert_eq_normalized(&output, "");
+}
+
+#[test]
 fn preserves_object_literal_computed_key_coercion() {
     let input = r#"
 ({
