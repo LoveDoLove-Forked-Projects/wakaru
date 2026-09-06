@@ -78,8 +78,12 @@ function moduleParts(code) {
       exports.push(...statement.exportClause.elements);
     } else if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement))
       && statement.name && statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) {
-      // These fixtures have only named exports; fail closed for default forms.
-      if (statement.modifiers.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword)) return null;
+      // Preserve default declarations exactly: splitting them can change a
+      // live default binding into a snapshot. Any alternate form is snippet-local.
+      if (statement.modifiers.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword)) {
+        body.push(printer.printNode(ts.EmitHint.Unspecified, statement, file));
+        continue;
+      }
       exports.push(ts.factory.createExportSpecifier(false, undefined, statement.name));
       body.push(printer.printNode(ts.EmitHint.Unspecified, ts.factory.replaceModifiers(
         statement, statement.modifiers.filter((m) => m.kind !== ts.SyntaxKind.ExportKeyword),

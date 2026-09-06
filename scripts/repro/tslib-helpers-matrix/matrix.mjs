@@ -56,6 +56,21 @@ const snippets = [
     source: "export function template(name) { return tag`hello ${name}`; }",
   },
   {
+    name: "private-field-default",
+    source: "export default class Foo { #x = 1; getX() { return this.#x; } setX(value) { this.#x = value; } }",
+    // Foo is never reassigned here, so the split default export is equivalent.
+    acceptForms: ["class Foo { #x = 1; getX() { return this.#x; } setX(value) { this.#x = value; } } export default Foo;"],
+    targets: ["ES2015"],
+  },
+  {
+    name: "private-field-expression",
+    source: "const Foo = class { #x = 1; getX() { return this.#x; } setX(value) { this.#x = value; } }; export { Foo };",
+    // This class has no definition-time effects, and Foo is never reassigned.
+    // The pipeline may retain adjacent declaration/assignment after sequence splitting.
+    acceptForms: ["export let Foo; Foo = class { #x = 1; getX() { return this.#x; } setX(value) { this.#x = value; } };"],
+    targets: ["ES2015"],
+  },
+  {
     name: "private-field",
     source: "export class Foo { #x = 1; getX() { return this.#x; } setX(value) { this.#x = value; } }",
     targets: ["ES2015"],

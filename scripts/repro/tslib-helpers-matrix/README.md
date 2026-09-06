@@ -47,6 +47,17 @@ names, other imports, declarations, expressions, and side effects still need
 to match. It accepts destructuring moved into a parameter via explicit alternate
 forms; it does not accept unrecovered indexing as equivalent destructuring.
 
+Private-field snippets cover named class exports, a default class export, and
+an exported class expression. The default-export fixture explicitly accepts a
+separate `export default Foo` because `Foo` is never reassigned. The class-expression
+fixture also accepts an adjacent `export let Foo; Foo = class ...` form: that
+specific class has no definition-time effects and no later binding writes, so
+nothing observes the intermediate binding value. These are complete-module
+alternatives for those snippets, not general declaration/export normalization.
+Extra calls, reassignment, and unrecovered helper uses still fail comparison.
+Rule tests separately cover direct `export default class`, an intervening default
+export, single-declarator class expressions, and their lifetime hazards.
+
 Private names are alpha-normalized by their lexical class binding. The
 adapter tracks nested classes, outer private references, and heritage
 expressions separately; public method/property names and the choice of private
@@ -65,7 +76,7 @@ runtime compatibility. The script-only execution harness cannot run these
 modules; no `execute` check is claimed. The matrix does not install or execute
 tslib itself. Runtime behavior tests remain separate from this recovery score.
 
-The current baseline has **99 yes / 15 no / 0 errors across 114 distinct
+The current baseline has **117 yes / 15 no / 0 errors across 132 distinct
 shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
 
 - Compressed array-destructuring cases retain iterator helpers.
@@ -75,7 +86,7 @@ shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
 The original tslib awaiter regression passes all 18 ES5/ES2015 profiles.
 The mixed producer adds three passing async shapes (raw and both Terser variants).
 Tagged templates and generator delegation now pass across inline, namespace,
-and named-import profiles. Private fields pass all nine delivery/minifier
+and named-import profiles. Private fields pass all 27 class/export/delivery/minifier
 shapes; both interop snippets pass every applicable CommonJS shape.
 Fixes should turn their failing shapes into `yes`; regenerate `stats.json`
 and its README/website aggregate when measured numbers change. A falling

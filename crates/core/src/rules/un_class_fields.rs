@@ -523,37 +523,31 @@ fn private_map_has_stable_lifetime(
         if initializes && initializer.replace(index).is_some() {
             return false;
         }
-        let class = match item {
-            ModuleItem::Stmt(Stmt::Decl(Decl::Class(decl))) => Some(&*decl.class),
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export)) => {
-                match &export.decl {
-                    Decl::Class(decl) => Some(&*decl.class),
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
-        if let Some(class) = class {
+        if let Some((class, binding)) = private_map_class_owner(item, unresolved_mark) {
             let mut refs = PrivateMapRefCollector {
                 private_maps,
                 refs: HashSet::new(),
             };
             class.body.visit_with(&mut refs);
             if refs.refs.contains(key) {
-                owner = Some((index, class));
+                owner = Some((index, class, binding));
             }
         }
     }
-    let (Some(initializer), Some((owner, class))) = (initializer, owner) else {
+    let (Some(initializer), Some((owner, class, binding))) = (initializer, owner) else {
         return false;
     };
     if initializer < owner {
         return true;
     }
-    // Local export lists have no evaluation step. UnEsm inserts one between
-    // the class declaration and tsc's backing-map initialization.
+    // Local export lists have no evaluation step. Reading the already-created
+    // owner binding for a default export cannot run user code either. Do not
+    // allow arbitrary identifiers: an unresolved global can invoke a getter.
     module.body[owner + 1..initializer].iter().all(|item| {
         matches!(item, ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportNamed(export)) if export.src.is_none())
+            || matches!(item, ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultExpr(export))
+                if matches!(crate::utils::paren::strip_parens(&export.expr), Expr::Ident(id)
+                    if binding.is_some_and(|owner_id| binding_key(owner_id) == binding_key(id))))
             || matches!(item, ModuleItem::Stmt(Stmt::Empty(_)))
     })
         && class.decorators.is_empty()
@@ -565,6 +559,62 @@ fn private_map_has_stable_lifetime(
             }
             _ => false,
         })
+}
+
+// Identify the class and the outer binding that receives it. A named class
+// expression's self binding is not the variable that owns the resulting class.
+fn private_map_class_owner(
+    item: &ModuleItem,
+    unresolved_mark: Mark,
+) -> Option<(&Class, Option<&Ident>)> {
+    use crate::utils::paren::strip_parens;
+    use swc_core::ecma::ast::{DefaultDecl, ModuleDecl};
+
+    let decl = match item {
+        ModuleItem::Stmt(Stmt::Decl(decl)) => decl,
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => &export.decl,
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => {
+            let DefaultDecl::Class(expr) = &export.decl else {
+                return None;
+            };
+            return Some((&expr.class, expr.ident.as_ref()));
+        }
+        ModuleItem::Stmt(Stmt::Expr(stmt)) => {
+            // Sequence splitting turns tsc class-expression factories into
+            // `_a = class ...; map = new WeakMap(); const Foo = _a;`.
+            let Expr::Assign(assign) = strip_parens(&stmt.expr) else {
+                return None;
+            };
+            if assign.op != AssignOp::Assign {
+                return None;
+            }
+            let AssignTarget::Simple(SimpleAssignTarget::Ident(binding)) = &assign.left else {
+                return None;
+            };
+            if binding.id.ctxt.outer() == unresolved_mark {
+                return None;
+            }
+            let Expr::Class(expr) = strip_parens(&assign.right) else {
+                return None;
+            };
+            return Some((&expr.class, Some(&binding.id)));
+        }
+        _ => return None,
+    };
+    match decl {
+        Decl::Class(decl) => Some((&decl.class, Some(&decl.ident))),
+        Decl::Var(var) if var.decls.len() == 1 => {
+            let declarator = &var.decls[0];
+            let Pat::Ident(binding) = &declarator.name else {
+                return None;
+            };
+            let Expr::Class(expr) = strip_parens(declarator.init.as_deref()?) else {
+                return None;
+            };
+            Some((&expr.class, Some(&binding.id)))
+        }
+        _ => None,
+    }
 }
 
 struct PrivateMapClassConsumerCounter<'a> {

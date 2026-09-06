@@ -300,9 +300,14 @@ rewrite mode all preserve the lowered form.
 `UnClassFields` promotes a backing WeakMap only when one class owns it and
 its initialization has a stable lifetime. It must have exactly one allocation:
 either before the class, or immediately after a class without definition-time
-executable members. Local export lists and empty statements may intervene;
-executable statements may not. Earlier construction, later resets (including
-comma expressions), escaping maps, and unsupported map uses keep the lowered
+executable members. Owners include top-level class declarations, default-export
+classes, single-declarator class expressions, and class assignments to resolved
+local bindings (the result of splitting tsc's class-expression sequences).
+For class expressions, the owner binding is the outer target, not an optional
+class self name. Local export lists, empty statements, and a default export
+reading that exact owner binding may intervene; arbitrary identifiers, calls,
+and other executable statements may not. Earlier construction, later resets
+(including comma expressions), escaping maps, and unsupported map uses keep the lowered
 form. These are proof requirements, not rewrite assumptions.
 
 Get/set calls accept resolver-proven tslib named aliases, namespaces, direct

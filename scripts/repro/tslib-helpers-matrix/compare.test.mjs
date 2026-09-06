@@ -66,3 +66,23 @@ test("private-name comparison preserves brand checks and rejects unbound names",
   assert.ok(matches("export class Foo { #r; has(o) { return #r in o; } }", snippet));
   assert.equal(matches("export class Foo { #r; has(o) { return #__private0 in o; } }", snippet), false);
 });
+
+test("default class exports retain their spelling unless an alternate form is explicit", () => {
+  const source = "export default class Foo { #x = 1; getX() { return this.#x; } }";
+  const split = "class Foo { #x = 1; getX() { return this.#x; } } export default Foo;";
+  assert.ok(matches(source, { source }));
+  assert.equal(matches("export class Foo { #x = 1; getX() { return this.#x; } }", { source }), false);
+  assert.equal(matches(split, { source }), false);
+  assert.ok(matches(split, { source, acceptForms: [split] }));
+  assert.equal(matches(split.replace("export default Foo", "export default other"), { source, acceptForms: [split] }), false);
+});
+
+test("class-expression alternate form still requires the complete recovered module", () => {
+  const source = "const Foo = class { #x = 1; getX() { return this.#x; } }; export { Foo };";
+  const split = "export let Foo; Foo = class { #x = 1; getX() { return this.#x; } };";
+  const snippet = { source, acceptForms: [split] };
+  assert.ok(matches(split, snippet));
+  assert.equal(matches(split.replace("Foo = class", "observe(Foo); Foo = class"), snippet), false);
+  assert.equal(matches(split + "Foo = other;", snippet), false);
+  assert.equal(matches(split.replace("this.#x", "get(this, map)"), snippet), false);
+});

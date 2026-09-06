@@ -766,3 +766,99 @@ fn tslib_private_fields_keep_unsupported_calls_and_helper_writes() {
         assert!(output.contains("_Foo_x.set(this, 1)"), "{output}");
     }
 }
+
+fn private_owner_source(owner: &str, between: &str) -> String {
+    let body = "constructor() { _Foo_x.set(this, 1); } getX() { return get(this, _Foo_x, 'f'); }";
+    format!(
+        "var get = this && this.__classPrivateFieldGet || function(receiver, state) {{ return state.get(receiver); }}; var _Foo_x; {} {between} _Foo_x = new WeakMap();",
+        owner.replace("BODY", body)
+    )
+}
+
+#[test]
+fn private_map_owner_accepts_default_class_declarations() {
+    for owner in [
+        "export default class Foo { BODY }",
+        "export default class { BODY }",
+    ] {
+        let output = apply_class_fields(&private_owner_source(owner, ""));
+        assert!(output.contains("#x = 1"), "{output}");
+        assert!(output.contains("return this.#x"), "{output}");
+        assert!(!output.contains("WeakMap"), "{output}");
+    }
+}
+
+#[test]
+fn private_map_owner_allows_export_default_of_the_owner_binding() {
+    let output = apply_class_fields(&private_owner_source(
+        "class Foo { BODY }",
+        "export default Foo;",
+    ));
+    assert!(output.contains("#x = 1"), "{output}");
+    assert!(output.contains("export default Foo"), "{output}");
+    assert!(!output.contains("WeakMap"), "{output}");
+}
+
+#[test]
+fn private_map_owner_accepts_single_class_expression_declarators() {
+    for owner in [
+        "const Foo = class { BODY };",
+        "let Foo = class { BODY };",
+        "var Foo = class { BODY };",
+        "export const Foo = class { BODY };",
+        "const Foo = (class Inner { BODY });",
+    ] {
+        let output = apply_class_fields(&private_owner_source(owner, ""));
+        assert!(output.contains("#x = 1"), "{output}");
+        assert!(!output.contains("WeakMap"), "{output}");
+    }
+}
+
+#[test]
+fn private_map_owner_accepts_lowered_class_assignment_to_local_binding() {
+    let output = apply_class_fields(&private_owner_source(
+        "var Foo; Foo = class { BODY };",
+        "export default Foo;",
+    ));
+    assert!(output.contains("#x = 1"), "{output}");
+    assert!(!output.contains("WeakMap"), "{output}");
+}
+
+#[test]
+fn private_map_owner_keeps_definition_and_intervening_execution_boundaries() {
+    for (owner, between) in [
+        ("export default class Foo { BODY }", "new Foo();"),
+        (
+            "export default class Foo { BODY static first = new Foo(); }",
+            "",
+        ),
+        ("const Foo = class { BODY };", "new Foo();"),
+        ("const Foo = class { BODY }, instance = new Foo();", ""),
+        ("const Foo = class { BODY static { invoke(); } };", ""),
+        ("var Foo; Foo = class { BODY };", "new Foo();"),
+        ("Foo = class { BODY };", ""),
+        ("class Foo { BODY }", "export default external;"),
+        ("let other; class Foo { BODY }", "export default other;"),
+        ("class Foo { BODY }", "export default new Foo();"),
+        ("class Foo { BODY }", "_Foo_x = new WeakMap();"),
+    ] {
+        let output = apply_class_fields(&private_owner_source(owner, between));
+        assert!(!output.contains("#x"), "{output}");
+        assert!(output.contains("_Foo_x.set(this, 1)"), "{output}");
+    }
+}
+
+#[test]
+fn private_map_owner_recovers_real_tsc_default_and_expression_modules() {
+    for source in [
+        include_str!("fixtures/private-field-owners/default-esm.js"),
+        include_str!("fixtures/private-field-owners/default-cjs.js"),
+        include_str!("fixtures/private-field-owners/expression-esm.js"),
+        include_str!("fixtures/private-field-owners/expression-cjs.js"),
+    ] {
+        let output = render(source);
+        assert!(output.contains("#x = 1"), "{output}");
+        assert!(output.contains("return this.#x"), "{output}");
+        assert!(!output.contains("WeakMap"), "{output}");
+    }
+}
