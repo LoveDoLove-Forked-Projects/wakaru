@@ -662,7 +662,7 @@ pub(super) fn unpack_multi_module_with_plan(
                 options.level,
                 false,
             ));
-            module.visit_mut_with(&mut UnAssignmentMerging);
+            module.visit_mut_with(&mut UnAssignmentMerging::new(unresolved_mark));
             // UnIife2 can expose webpack export helpers that were hidden in
             // factory wrappers at the Stage 2 barrier. Recover just that ESM
             // shape without restoring the old full second pass.

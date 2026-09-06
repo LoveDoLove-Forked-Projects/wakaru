@@ -161,9 +161,37 @@ rationale, or level gating appear.
   `minimal` and `standard` preserve literal receivers.
 - **UnEsmoduleFlag** — removes `__esModule` flag statements; confirmed UnEsm
   prerequisite (export classification noise).
-- **UnAssignmentMerging** — splits `a = b = val`; confirmed UnEsm
-  prerequisite: `exports.foo = exports.bar = val` must be split before named
-  export detection. Also feeds UnVariableMerging.
+- **UnAssignmentMerging** — splits `a = b = val` into one statement per
+  target, innermost first (`b = val; a = val;`), which is the order the
+  chained form commits its writes (own setters, a throwing `const` write).
+  Splitting also moves each target's reference evaluation next to its write,
+  so a target is accepted only when that evaluation can neither throw nor
+  change between the writes: a plain identifier, or a member rooted at the
+  CommonJS wrapper bindings `module`, `exports`, `require` (`module.exports.x`
+  included), with identifier, private-name, or string/number literal keys.
+  Everything else keeps the chain at every level: a local root may be in TDZ
+  (`root.x = inner = 1; let root = {}` throws before `inner` is written) or be
+  reassigned by an inner setter, `this` throws before `super()` in a derived
+  constructor, an undeclared global root throws, computed keys may run code,
+  call receivers reorder calls. The value is evaluated once per split
+  statement, so an identifier value (other than `undefined`) is accepted only
+  when no write can change it: identifier targets must be resolved bindings
+  or CommonJS names, and CommonJS-rooted member targets rely on
+  `commonjs_exports_data_properties` (a setter on the module's own `exports`
+  could reassign the value; accepted, not proven). An undeclared global
+  identifier target may be a global-object accessor and splits only with a
+  literal value. (The webpack unpacker's localized reused parameter,
+  `var _publicValue`, now carries a non-unresolved context for this reason.) The remaining chains (`t.prototype.a = t.prototype.b = fn`,
+  `o[A] = o[B] = true`, TypeScript's `ns.A = ns.B = void 0` on a local
+  namespace object) are source form, not minifier output: swc's
+  `merge_sequential_expr` (and terser's `collapse_vars`, from memory) only
+  build a chain whose inner target is an identifier, and TypeScript
+  synthesizes the `exports` chain against an object it owns. A `standard`
+  same-root extension under a new setter assumption was considered and not
+  taken for that reason (2026-09-06). Confirmed UnEsm prerequisite:
+  `exports.foo = exports.bar = val` must be split before named export
+  detection, and UnEsm's coupled `module.exports = helper = val` recovery
+  re-merges the innermost-first pair. Also feeds UnVariableMerging.
 - **UnVariableMergingDeclsOnly vs UnVariableMerging** — the decls-only subset
   runs early as a confirmed UnEsm prerequisite (one declarator per statement
   so CJS imports classify); the full pass stays later because its for-loop

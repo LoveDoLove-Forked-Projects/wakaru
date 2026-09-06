@@ -448,6 +448,38 @@ Level: `standard` and above. `minimal` preserves this lowered constructor and
 wrapper. Other existing class recoveries have their own boundaries; this is
 not a claim that `minimal` preserves every lowered class.
 
+### `commonjs_exports_data_properties`
+
+Properties that compiler-emitted code writes on the module's own `exports` /
+`module.exports` object are ordinary data properties. No accessor installed on
+that object runs when such a write is reordered or repeated.
+
+CommonJS does not guarantee this. A module may install a setter on its own
+export object:
+
+```js
+let value = 1;
+Object.defineProperty(exports, "b", { set(v) { value = 2; } });
+exports.a = exports.b = value; // chain: reads value once, a receives 1
+exports.b = value; exports.a = value; // split: a receives 2
+```
+
+In the transpiler output examined so far and in the private fixtures, an
+accessor on `exports` never appears together with a chained export assignment:
+TypeScript's `exports.A = exports.B = void 0` and Babel's
+`exports.default = exports.x = value` are emitted against a fresh object whose
+accessors, if any, are live re-export getters on other keys. That is an
+observation, not a guarantee. The hazard is accepted rather than proven; the
+CommonJS wrapper only guarantees that `module`, `exports`, and `require` are
+defined.
+
+Affects: `UnAssignmentMerging` (splitting `exports.a = exports.b = value` with
+an identifier value; a literal value cannot change and needs no assumption),
+`UnEsm` (every `exports.x = v` to `export` recovery replaces a property write
+with a binding, so an accessor on `exports` is already ignored).
+
+Level: all levels. UnEsm's recovery is itself unconditional on this point.
+
 ### `import_hoisting_eagerness`
 
 Converting a CommonJS `require()` into an ESM `import` moves the provider's

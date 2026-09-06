@@ -1,12 +1,79 @@
 use std::collections::HashSet;
 
-use swc_core::common::DUMMY_SP;
+use swc_core::common::{Mark, SyntaxContext, DUMMY_SP};
 use swc_core::ecma::ast::{
-    AssignExpr, AssignOp, AssignTarget, Expr, ExprStmt, Ident, ModuleItem, SimpleAssignTarget, Stmt,
+    AssignExpr, AssignOp, AssignTarget, Expr, ExprStmt, Ident, Lit, MemberExpr, MemberProp,
+    ModuleItem, SimpleAssignTarget, Stmt,
 };
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
-pub struct UnAssignmentMerging;
+/// Splits `a = b = value` into one assignment statement per target.
+///
+/// A chained assignment evaluates every target reference from the outermost
+/// to the innermost, then evaluates the value, then writes from the innermost
+/// to the outermost. The split keeps that write order (`b = value; a = value`)
+/// so a throwing write or an own setter still observes the same prefix of
+/// writes.
+///
+/// Splitting also moves each target's reference evaluation next to its write.
+/// That is only invisible when evaluating the reference can neither throw nor
+/// change between the writes, so the rule accepts exactly these targets:
+///
+/// - a plain identifier (resolving a name has no effect; a TDZ or `const`
+///   violation throws at the write, whose order is preserved);
+/// - a member rooted at the CommonJS wrapper bindings `module`, `exports`, or
+///   `require`, which the wrapper always defines (`exports.foo = exports.bar
+///   = 1`, `module.exports = exports = fn`, `module.exports.a =
+///   module.exports.b = 1`).
+///
+/// Keys must be identifiers, private names, or string/number literals. Any
+/// other target keeps the chain: a local root may be in TDZ or be reassigned
+/// by an inner setter, `this` throws before `super()` in a derived
+/// constructor, a computed key may run code, a call receiver reorders calls.
+/// There is no level gating.
+///
+/// The split also evaluates the value once per target instead of once. A
+/// literal cannot change, but an identifier can if an earlier write runs user
+/// code that reassigns it (`o.a = o.b = value` with a `b` setter). An
+/// identifier value is therefore accepted only when the writes are resolved
+/// identifier targets, which run no code, or the CommonJS targets above. The
+/// latter is an accepted assumption, not a guarantee: a module can install an
+/// accessor on its own `exports` object, and such a setter reassigning the
+/// value binding would make the second read differ. Compiler-emitted export
+/// chains never do this, so `commonjs_exports_data_properties` covers it. An
+/// undeclared global identifier target may be an accessor on the global
+/// object, so it splits only with a literal value.
+///
+/// Keeping those chains is not a recovery loss. Minifiers only form a chain
+/// when the inner target is an identifier (`a = v; b.c = a` becomes
+/// `b.c = a = v`; swc's `merge_sequential_expr` requires `as_ident()` on the
+/// merged target), which the identifier case above reverses. Member-only
+/// chains such as `o.x = o.y = v`, flag tables `t[A] = t[B] = true`, and
+/// TypeScript's synthesized `exports.A = exports.B = void 0` are how the
+/// source was written or generated, so they are already in source form. The
+/// CommonJS exception rests on the same fact TypeScript relies on when it
+/// synthesizes that chain: the module owns its `exports` object.
+///
+/// A `standard`-only extension for chains whose targets share one root was
+/// considered and not taken. TDZ would be covered (the innermost statement
+/// throws first), but a setter reassigning the shared root has no proof and
+/// would need a new named assumption, in exchange for expanding chains that
+/// the source already contained.
+pub struct UnAssignmentMerging {
+    unresolved_ctxt: SyntaxContext,
+}
+
+impl UnAssignmentMerging {
+    pub fn new(unresolved_mark: Mark) -> Self {
+        Self {
+            unresolved_ctxt: SyntaxContext::empty().apply_mark(unresolved_mark),
+        }
+    }
+
+    fn identifier_target_is_binding_write(&self, ident: &Ident) -> bool {
+        ident.ctxt != self.unresolved_ctxt || is_commonjs_scope_binding(ident.sym.as_ref())
+    }
+}
 
 impl VisitMut for UnAssignmentMerging {
     fn visit_mut_module_items(&mut self, items: &mut Vec<ModuleItem>) {
@@ -17,7 +84,7 @@ impl VisitMut for UnAssignmentMerging {
         for item in original {
             match item {
                 ModuleItem::Stmt(stmt) => {
-                    let expanded = split_chained_assignment(stmt);
+                    let expanded = self.split_chained_assignment(stmt);
                     out.extend(expanded.into_iter().map(ModuleItem::Stmt));
                 }
                 other => out.push(other),
@@ -32,40 +99,149 @@ impl VisitMut for UnAssignmentMerging {
         let original = std::mem::take(stmts);
         let mut out = Vec::with_capacity(original.len());
         for stmt in original {
-            out.extend(split_chained_assignment(stmt));
+            out.extend(self.split_chained_assignment(stmt));
         }
         *stmts = out;
     }
 }
 
-/// Returns true if the statement is a chained assignment with a simple final value,
-/// meaning it should be split.
-fn should_split(stmt: &Stmt) -> bool {
-    let Stmt::Expr(ExprStmt { expr, .. }) = stmt else {
-        return false;
-    };
-    let Expr::Assign(a) = &**expr else {
-        return false;
-    };
-    if a.op != AssignOp::Assign {
-        return false;
-    }
-    // Must be chained: right side is also an assignment
-    let Expr::Assign(inner) = &*a.right else {
-        return false;
-    };
-    if inner.op != AssignOp::Assign {
-        return false;
-    }
-    // Walk to the final (non-assignment) value
-    let mut cur: &Expr = a.right.as_ref();
-    while let Expr::Assign(a2) = cur {
-        if a2.op != AssignOp::Assign {
+impl UnAssignmentMerging {
+    /// Returns true if the statement is a chained assignment with a simple final
+    /// value, meaning it should be split.
+    fn should_split(&self, stmt: &Stmt) -> bool {
+        let Stmt::Expr(ExprStmt { expr, .. }) = stmt else {
+            return false;
+        };
+        let Expr::Assign(a) = &**expr else {
+            return false;
+        };
+        if a.op != AssignOp::Assign {
             return false;
         }
-        cur = &a2.right;
+        // Must be chained: right side is also an assignment
+        let Expr::Assign(inner) = &*a.right else {
+            return false;
+        };
+        if inner.op != AssignOp::Assign {
+            return false;
+        }
+        // Walk to the final (non-assignment) value
+        let mut cur: &Expr = a.right.as_ref();
+        while let Expr::Assign(a2) = cur {
+            if a2.op != AssignOp::Assign {
+                return false;
+            }
+            cur = &a2.right;
+        }
+        if !is_simple_value(cur)
+            || !targets_can_be_split(a)
+            || !targets_are_stable_references(a, self.unresolved_ctxt)
+        {
+            return false;
+        }
+        match cur {
+            Expr::Ident(value)
+                if value.ctxt == self.unresolved_ctxt && value.sym.as_ref() == "undefined" =>
+            {
+                true
+            }
+            Expr::Ident(_) => self.writes_cannot_change_value(a),
+            _ => true,
+        }
     }
-    is_simple_value(cur) && targets_can_be_split(a)
+
+    /// True when nothing between the repeated value reads can change the
+    /// value: every write is a resolved binding store, or an export store on
+    /// the module's own `exports` object (`commonjs_exports_data_properties`).
+    fn writes_cannot_change_value(&self, assign: &AssignExpr) -> bool {
+        let mut current = assign;
+        loop {
+            let ok = match &current.left {
+                AssignTarget::Simple(SimpleAssignTarget::Ident(ident)) => {
+                    self.identifier_target_is_binding_write(&ident.id)
+                }
+                // Member targets already passed the CommonJS-root check;
+                // their setters are excluded by assumption, not by proof.
+                AssignTarget::Simple(SimpleAssignTarget::Member(_)) => true,
+                _ => false,
+            };
+            if !ok {
+                return false;
+            }
+            match current.right.as_ref() {
+                Expr::Assign(next) if next.op == AssignOp::Assign => current = next,
+                _ => return true,
+            }
+        }
+    }
+
+    /// Splits a chained assignment statement into individual assignment
+    /// statements, if applicable. Otherwise returns the statement unchanged
+    /// (wrapped in a Vec).
+    ///
+    /// Writes are emitted innermost first, matching the order in which the
+    /// chained form commits them.
+    fn split_chained_assignment(&self, stmt: Stmt) -> Vec<Stmt> {
+        if !self.should_split(&stmt) {
+            return vec![stmt];
+        }
+        split_chained_assignment_unchecked(stmt)
+    }
+}
+
+/// Every target must be a reference whose evaluation cannot throw, run user
+/// code, or observe the other writes. See the type-level docs for the list.
+fn targets_are_stable_references(assign: &AssignExpr, unresolved_ctxt: SyntaxContext) -> bool {
+    let mut current = assign;
+    loop {
+        if !target_is_stable_reference(&current.left, unresolved_ctxt) {
+            return false;
+        }
+        match current.right.as_ref() {
+            Expr::Assign(next) if next.op == AssignOp::Assign => current = next,
+            _ => return true,
+        }
+    }
+}
+
+fn target_is_stable_reference(target: &AssignTarget, unresolved_ctxt: SyntaxContext) -> bool {
+    match target {
+        AssignTarget::Simple(SimpleAssignTarget::Ident(_)) => true,
+        AssignTarget::Simple(SimpleAssignTarget::Member(member)) => {
+            member_has_stable_root(member, unresolved_ctxt)
+        }
+        _ => false,
+    }
+}
+
+fn member_has_stable_root(member: &MemberExpr, unresolved_ctxt: SyntaxContext) -> bool {
+    let key_is_static = match &member.prop {
+        MemberProp::Ident(_) | MemberProp::PrivateName(_) => true,
+        MemberProp::Computed(computed) => {
+            matches!(computed.expr.as_ref(), Expr::Lit(Lit::Str(_) | Lit::Num(_)))
+        }
+    };
+    if !key_is_static {
+        return false;
+    }
+    match member.obj.as_ref() {
+        Expr::Ident(root) => {
+            root.ctxt == unresolved_ctxt && is_commonjs_scope_binding(root.sym.as_ref())
+        }
+        // `module.exports.x`: the intermediate read is a data property of the
+        // wrapper's module object.
+        Expr::Member(inner) => {
+            member_has_stable_root(inner, unresolved_ctxt)
+                && matches!(inner.obj.as_ref(), Expr::Ident(_))
+        }
+        _ => false,
+    }
+}
+
+/// The CommonJS wrapper always defines `module`, `exports`, and `require`, so
+/// evaluating a member reference on them cannot throw a ReferenceError.
+fn is_commonjs_scope_binding(name: &str) -> bool {
+    matches!(name, "module" | "exports" | "require")
 }
 
 /// A "simple" value is an identifier or a primitive literal.
@@ -144,13 +320,7 @@ impl Visit for IdentReferenceCollector {
     }
 }
 
-/// Splits a chained assignment statement into individual assignment statements,
-/// if applicable. Otherwise returns the statement unchanged (wrapped in a Vec).
-fn split_chained_assignment(stmt: Stmt) -> Vec<Stmt> {
-    if !should_split(&stmt) {
-        return vec![stmt];
-    }
-
+fn split_chained_assignment_unchecked(stmt: Stmt) -> Vec<Stmt> {
     // Destructure the statement to collect all targets and the final value
     let Stmt::Expr(ExprStmt { span, expr }) = stmt else {
         unreachable!("should_split ensures this is an ExprStmt");
@@ -173,6 +343,7 @@ fn split_chained_assignment(stmt: Stmt) -> Vec<Stmt> {
                 let final_value = Box::new(final_expr);
                 return assignments
                     .into_iter()
+                    .rev()
                     .map(|target| {
                         Stmt::Expr(ExprStmt {
                             span,

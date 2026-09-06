@@ -286,7 +286,9 @@ runner!(run_un_curly_braces, UnCurlyBraces);
 runner!(run_un_esmodule_flag, |ctx| UnEsmoduleFlag::new(
     ctx.unresolved_mark
 ));
-runner!(run_un_assignment_merging, UnAssignmentMerging);
+runner!(run_un_assignment_merging, |ctx| {
+    UnAssignmentMerging::new(ctx.unresolved_mark)
+});
 runner!(run_un_webpack_interop, |ctx| UnWebpackInterop::new(
     ctx.unresolved_mark
 ));

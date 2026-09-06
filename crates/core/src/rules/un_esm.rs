@@ -856,7 +856,8 @@ fn recover_coupled_commonjs_default_binding(module: &mut Module, unresolved_mark
     };
 
     // UnAssignmentMerging may have expanded a simple
-    // `module.exports = helper = value` into two adjacent assignments. Prove
+    // `module.exports = helper = value` into two adjacent assignments, written
+    // innermost first (`helper = value; module.exports = value;`). Prove
     // against a normalized clone so a failed proof never mutates the input.
     let mut proof_module = module.clone();
     if !merge_candidate_split_assignments(&mut proof_module, &plan.binding, unresolved_mark)
@@ -1106,10 +1107,19 @@ fn merge_split_coupled_assignment_pair(
     binding: &BindingId,
     unresolved_mark: Mark,
 ) -> Option<AssignExpr> {
+    // The split keeps the chained write order: the inner binding write comes
+    // first, the outer `module.exports` write second.
     let Stmt::Expr(first_statement) = first else {
         return None;
     };
-    let Expr::Assign(module_assignment) = strip_parens(&first_statement.expr) else {
+    let Expr::Assign(binding_assignment) = strip_parens(&first_statement.expr) else {
+        return None;
+    };
+
+    let Stmt::Expr(second_statement) = second else {
+        return None;
+    };
+    let Expr::Assign(module_assignment) = strip_parens(&second_statement.expr) else {
         return None;
     };
     if module_assignment.op != AssignOp::Assign {
@@ -1121,13 +1131,6 @@ fn merge_split_coupled_assignment_pair(
     if !is_module_exports_member(target, unresolved_mark) {
         return None;
     }
-
-    let Stmt::Expr(second_statement) = second else {
-        return None;
-    };
-    let Expr::Assign(binding_assignment) = strip_parens(&second_statement.expr) else {
-        return None;
-    };
     if binding_assignment.op != AssignOp::Assign
         || !assign_target_matches_binding(&binding_assignment.left, binding)
         || !same_split_coupled_value(&module_assignment.right, &binding_assignment.right)

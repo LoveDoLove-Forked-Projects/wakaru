@@ -171,8 +171,8 @@ function N() {
     if (P) {
         let e = P;
         const t = _;
-        _ = null;
         P = null;
+        _ = null;
         j(e);
         if (t) {
             for(e = 0; e < t.length; e++){
@@ -2004,13 +2004,9 @@ o(Bn.prototype, {
         for(e in Interface){
             this[e] = null;
         }
-        this.nativeEvent = null;
-        this._targetInst = null;
-        this.dispatchConfig = null;
-        this.isPropagationStopped = $n;
-        this.isDefaultPrevented = $n;
-        this._dispatchInstances = null;
-        this._dispatchListeners = null;
+        this.nativeEvent = this._targetInst = this.dispatchConfig = null;
+        this.isPropagationStopped = this.isDefaultPrevented = $n;
+        this._dispatchInstances = this._dispatchListeners = null;
     }
 });
 Bn.Interface = {
@@ -2179,9 +2175,9 @@ const BeforeInputEventPlugin = {
             if (ur) {
                 if (e === "compositionend" || !Jn && ir(e, t)) {
                     e = Hn();
-                    Un = null;
-                    qn = null;
                     zn = null;
+                    qn = null;
+                    Un = null;
                     ur = false;
                     return e;
                 }
@@ -2286,8 +2282,8 @@ let br = false;
 function gr() {
     if (pr) {
         pr.detachEvent("onpropertychange", wr);
-        hr = null;
         pr = null;
+        hr = null;
     }
 }
 function wr(e) {
@@ -2666,9 +2662,9 @@ const SelectEventPlugin = {
                 }
                 break;
             case "blur":
-                Br = null;
-                $r = null;
                 Wr = null;
+                $r = null;
+                Br = null;
                 break;
             case "mousedown":
                 Vr = true;
@@ -3174,9 +3170,9 @@ let Jo = null;
 let Zo = null;
 let ei = null;
 function ti() {
-    ei = null;
-    Zo = null;
     Jo = null;
+    Zo = null;
+    ei = null;
 }
 function ni(e) {
     const Xo_current = Xo.current;
@@ -3202,8 +3198,8 @@ function ri(e, t) {
 }
 function oi(e, t) {
     Jo = e;
-    ei = null;
     Zo = null;
+    ei = null;
     if ((e = e.dependencies) !== null && e.firstContext !== null) {
         if (e.expirationTime >= t) {
             Ra = true;
@@ -3288,8 +3284,7 @@ function fi(e, t) {
         li(e_alternate, e);
     }
     if ((e_alternate = (e = e.updateQueue).baseQueue) === null) {
-        e.baseQueue = t;
-        t.next = t;
+        e.baseQueue = t.next = t;
         t.next = t;
     } else {
         t.next = e_alternate.next;
@@ -3333,8 +3328,8 @@ function di(e, t, n, r) {
                         next: null
                     };
                     if (p === null) {
-                        d = m;
                         p = m;
+                        d = m;
                         f = c;
                     } else {
                         p = p.next = m;
@@ -3396,8 +3391,7 @@ function di(e, t, n, r) {
                     }
                     h = i_baseQueue.next = pending.next;
                     pending.next = l;
-                    e_updateQueue.baseQueue = pending;
-                    i_baseQueue = pending;
+                    e_updateQueue.baseQueue = i_baseQueue = pending;
                     e_updateQueue.shared.pending = null;
                 }
             }
@@ -3613,8 +3607,7 @@ function Si(e) {
                 r.nextEffect = n;
                 t.lastEffect = n;
             } else {
-                t.firstEffect = n;
-                t.lastEffect = n;
+                t.firstEffect = t.lastEffect = n;
             }
             n.nextEffect = null;
             n.effectTag = 8;
@@ -4169,8 +4162,8 @@ function Yi(e, t, n, r, o, i) {
                 throw Error(a(301));
             }
             i += 1;
-            Bi = null;
             $i = null;
+            Bi = null;
             t.updateQueue = null;
             ReactCurrentDispatcher.current = wa;
             e = n(r, o);
@@ -4179,9 +4172,9 @@ function Yi(e, t, n, r, o, i) {
     ReactCurrentDispatcher.current = va;
     t = $i !== null && $i.next !== null;
     Hi = 0;
-    Bi = null;
-    $i = null;
     Wi = null;
+    $i = null;
+    Bi = null;
     Vi = false;
     if (t) {
         throw Error(a(300));
@@ -4197,8 +4190,7 @@ function Gi() {
         next: null
     };
     if (Bi === null) {
-        Wi.memoizedState = e;
-        Bi = e;
+        Wi.memoizedState = Bi = e;
     } else {
         Bi = Bi.next = e;
     }
@@ -4227,8 +4219,7 @@ function Xi() {
             next: null
         };
         if (Bi === null) {
-            Wi.memoizedState = e;
-            Bi = e;
+            Wi.memoizedState = Bi = e;
         } else {
             Bi = Bi.next = e;
         }
@@ -4257,8 +4248,7 @@ function Zi(e) {
             r_baseQueue.next = n_pending.next;
             n_pending.next = u;
         }
-        r.baseQueue = n_pending;
-        r_baseQueue = n_pending;
+        r.baseQueue = r_baseQueue = n_pending;
         t_queue.pending = null;
     }
     if (r_baseQueue !== null) {
@@ -4278,8 +4268,8 @@ function Zi(e) {
                     next: null
                 };
                 if (l === null) {
-                    u = f;
                     l = f;
+                    u = f;
                     n_pending = r;
                 } else {
                     l = l.next = f;
@@ -4358,8 +4348,7 @@ function ta(e) {
     if (typeof e === "function") {
         e = e();
     }
-    t.memoizedState = e;
-    t.baseState = e;
+    t.memoizedState = t.baseState = e;
     e = (e = t.queue = {
         pending: null,
         dispatch: null,
@@ -4384,11 +4373,9 @@ function na(e, t, n, r) {
             lastEffect: null
         };
         Wi.updateQueue = t;
-        t.lastEffect = e;
-        e.next = e;
+        t.lastEffect = e.next = e;
     } else if ((n = t.lastEffect) === null) {
-        t.lastEffect = e;
-        e.next = e;
+        t.lastEffect = e.next = e;
     } else {
         r = n.next;
         n.next = e;
@@ -4583,8 +4570,7 @@ var ba = {
     useReducer (e, t, n) {
         const r = Gi();
         t = n !== undefined ? n(t) : t;
-        r.memoizedState = t;
-        r.baseState = t;
+        r.memoizedState = r.baseState = t;
         e = (e = r.queue = {
             pending: null,
             dispatch: null,
@@ -4742,8 +4728,7 @@ function Ta(e, t) {
         e.lastEffect.nextEffect = n;
         e.lastEffect = n;
     } else {
-        e.firstEffect = n;
-        e.lastEffect = n;
+        e.firstEffect = e.lastEffect = n;
     }
 }
 function Sa(e, t) {
@@ -4832,8 +4817,8 @@ function Pa(e) {
     return true;
 }
 function _a() {
-    xa = null;
     Ea = null;
+    xa = null;
     ka = false;
 }
 const Y_ReactCurrentOwner = r___SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED.ReactCurrentOwner;
@@ -7078,8 +7063,8 @@ function fl(e, t) {
     Lu = t;
     Iu = Ou;
     Du = null;
-    zu = 1073741823;
     Fu = 1073741823;
+    zu = 1073741823;
     qu = null;
     Uu = 0;
     Hu = false;
@@ -7099,9 +7084,9 @@ function dl(e, t) {
                 }
             }
             Hi = 0;
-            Bi = null;
-            $i = null;
             Wi = null;
+            $i = null;
+            Bi = null;
             Vi = false;
             if (Au === null || Au.return === null) {
                 Iu = Cu;
@@ -7115,8 +7100,7 @@ function dl(e, t) {
                 let u = t;
                 t = Lu;
                 a.effectTag |= 2048;
-                a.firstEffect = null;
-                a.lastEffect = null;
+                a.firstEffect = a.lastEffect = null;
                 if (u !== null && typeof u === "object" && typeof u.then === "function") {
                     var l = u;
                     if ((2 & a.mode) == 0) {
@@ -7299,8 +7283,7 @@ function gl(e) {
                 return t;
             }
             if (e !== null) {
-                e.firstEffect = null;
-                e.lastEffect = null;
+                e.firstEffect = e.lastEffect = null;
                 e.effectTag |= 2048;
             }
         }
@@ -7346,9 +7329,7 @@ function El(e) {
         let o = wl(finishedWork);
         e.firstPendingTime = o;
         if (finishedExpirationTime <= e.lastSuspendedTime) {
-            e.firstSuspendedTime = 0;
-            e.lastSuspendedTime = 0;
-            e.nextKnownPendingLevel = 0;
+            e.firstSuspendedTime = e.lastSuspendedTime = e.nextKnownPendingLevel = 0;
         } else if (finishedExpirationTime <= e.firstSuspendedTime) {
             e.firstSuspendedTime = finishedExpirationTime - 1;
         }
@@ -7359,8 +7340,8 @@ function El(e) {
             e.lastExpiredTime = 0;
         }
         if (e === Mu) {
-            Au = null;
             Mu = null;
+            Au = null;
             Lu = 0;
         }
         if (finishedWork.effectTag > 1) {
@@ -7572,8 +7553,8 @@ function El(e) {
                 }
             }
             Bt = !!yn;
-            vn = null;
             yn = null;
+            vn = null;
             e.current = finishedWork;
             Bu = o;
             do {
@@ -7774,8 +7755,7 @@ bu = (e, t, n)=>{
                     case 5:
                         Li(t);
                         if (4 & t.mode && n !== 1 && o.hidden) {
-                            t.expirationTime = 1;
-                            t.childExpirationTime = 1;
+                            t.expirationTime = t.childExpirationTime = 1;
                             return null;
                         }
                         break;
@@ -7965,8 +7945,8 @@ bu = (e, t, n)=>{
                 if (o = t.stateNode.hydrate) {
                     xa = xn(t.stateNode.containerInfo.firstChild);
                     Ea = t;
-                    o = true;
                     ka = true;
+                    o = true;
                 }
                 if (o) {
                     n = Ci(t, null, t_expirationTime, n);
@@ -7997,8 +7977,7 @@ bu = (e, t, n)=>{
             }
             Ia(e, t);
             if (4 & t.mode && n !== 1 && o.hidden) {
-                t.expirationTime = 1;
-                t.childExpirationTime = 1;
+                t.expirationTime = t.childExpirationTime = 1;
                 t = null;
             } else {
                 Na(e, t, u, n);
@@ -8145,26 +8124,15 @@ function jl(e, t, n, r) {
     return new function(e, t, n, r) {
         this.tag = e;
         this.key = n;
-        this.sibling = null;
-        this.child = null;
-        this.return = null;
-        this.stateNode = null;
-        this.type = null;
-        this.elementType = null;
+        this.sibling = this.child = this.return = this.stateNode = this.type = this.elementType = null;
         this.index = 0;
         this.ref = null;
         this.pendingProps = t;
-        this.dependencies = null;
-        this.memoizedState = null;
-        this.updateQueue = null;
-        this.memoizedProps = null;
+        this.dependencies = this.memoizedState = this.updateQueue = this.memoizedProps = null;
         this.mode = r;
         this.effectTag = 0;
-        this.lastEffect = null;
-        this.firstEffect = null;
-        this.nextEffect = null;
-        this.childExpirationTime = 0;
-        this.expirationTime = 0;
+        this.lastEffect = this.firstEffect = this.nextEffect = null;
+        this.childExpirationTime = this.expirationTime = 0;
         this.alternate = null;
     }(e, t, n, r);
 }
@@ -8409,22 +8377,15 @@ class Bl {
             this.tag = t;
             this.current = null;
             this.containerInfo = e;
-            this.pingCache = null;
-            this.pendingChildren = null;
+            this.pingCache = this.pendingChildren = null;
             this.finishedExpirationTime = 0;
             this.finishedWork = null;
             this.timeoutHandle = -1;
-            this.pendingContext = null;
-            this.context = null;
+            this.pendingContext = this.context = null;
             this.hydrate = n;
             this.callbackNode = null;
             this.callbackPriority = 90;
-            this.lastExpiredTime = 0;
-            this.lastPingedTime = 0;
-            this.nextKnownPendingLevel = 0;
-            this.lastSuspendedTime = 0;
-            this.firstSuspendedTime = 0;
-            this.firstPendingTime = 0;
+            this.lastExpiredTime = this.lastPingedTime = this.nextKnownPendingLevel = this.lastSuspendedTime = this.firstSuspendedTime = this.firstPendingTime = 0;
         }(e, t, n = n != null && n.hydrate === true);
         const o = jl(3, null, null, t === 2 ? 7 : t === 1 ? 3 : 0);
         r.current = o;

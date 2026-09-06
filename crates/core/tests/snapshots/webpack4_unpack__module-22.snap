@@ -126,8 +126,7 @@ ${e.stack}`;
         ((e, t)=>{
             for(const n in t){
                 const r = t[n];
-                r.configurable = true;
-                r.enumerable = true;
+                r.configurable = r.enumerable = true;
                 if ("value" in r) {
                     r.writable = true;
                 }
