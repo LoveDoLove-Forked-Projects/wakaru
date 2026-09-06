@@ -425,6 +425,22 @@ node scripts/repro/parameters-matrix/matrix.mjs --dump nested-default babel-7.8-
 
 ### Writing a new matrix
 
+Producer launchers use `lib/tool-process.mjs`: `runNodeBatch` for asynchronous
+batches, `runNodeBatchSync` for synchronous batches, and `runNodeJsonArraySync`
+for validators with a custom row schema. Pass the launcher source, the input
+array, a diagnostic label, and the installed tool directory as `cwd`. Set
+`format: "commonjs"` for launchers using `require`; the default is ESM.
+These helpers pass the launcher directly to Node and the batch input on stdin.
+Do not write a shared launcher into the tool cache: concurrent invocations can
+read an empty file during overwrite or execute another profile's complete
+launcher. JSON validation reports the producer, exit/signal, output size and
+bounded stderr instead of a bare parse error.
+
+This isolates launcher execution, not dependency installation. Populate caches
+before concurrent runs and avoid refreshing/reinstalling a tool while another
+process uses it. `WAKARU_REPRO_JOBS` limits one matrix process; it does not lock
+tool caches across sessions.
+
 By default, matrices should spread `...mangleValidator()` from
 `lib/compare.mjs` into their `runMatrix()` config. This uses alpha-renaming normalization to compare
 mangled shapes structurally rather than by substring needle matching — without

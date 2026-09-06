@@ -1,3 +1,4 @@
+import { runNodeBatch } from "./tool-process.mjs";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
@@ -722,42 +723,6 @@ export function batchRunner(lazyBatch) {
   return lookup;
 }
 
-// Spawns the tool process without blocking the event loop, so multiple batches
-// run concurrently under runPool. Pipes JSON sources on stdin, parses the JSON
-// results array on stdout into a source→(code|Error) map.
-function runBatchHelperAsync(command, args, sources, options = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, {
-      cwd: options.cwd ?? repoRoot,
-      shell: options.shell ?? false,
-      env: { ...process.env, ...(options.env ?? {}) },
-    });
-    const stdout = [];
-    let stderr = "";
-    child.stdout.on("data", (chunk) => stdout.push(chunk));
-    child.stderr.on("data", (chunk) => (stderr += chunk));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0) {
-        const detail = [stderr.trim(), Buffer.concat(stdout).toString().trim()].filter(Boolean).join(" ");
-        reject(new Error(`${basename(command)} batch exited ${code}: ${detail}`));
-        return;
-      }
-      try {
-        const outputs = JSON.parse(Buffer.concat(stdout).toString());
-        const map = new Map();
-        for (let i = 0; i < sources.length; i++) {
-          map.set(sources[i], outputs[i].error ? new Error(outputs[i].error) : outputs[i].code);
-        }
-        resolvePromise(map);
-      } catch (error) {
-        reject(error);
-      }
-    });
-    child.stdin.end(JSON.stringify(sources));
-  });
-}
-
 export function ensureNodeTool(name, packages) {
   const toolRoot = join(repoRoot, "target", "repro-tools");
   const dir = join(toolRoot, name);
@@ -836,10 +801,7 @@ export function babelBatch(sources, profile, babelOptions = {}) {
   const pluginVersion = profile.plugin[1];
   const packages = [`@babel/core@${profile.core}`, `${pluginName}@${pluginVersion}`];
   const toolDir = ensureNodeTool(`babel-${profile.core}`, packages);
-  const helper = join(toolDir, "babel-batch.mjs");
-  writeFileSync(
-    helper,
-    `
+  const helperSource = `
 import fs from "node:fs";
 const babelModule = await import("@babel/core");
 const pluginModule = await import(${JSON.stringify(pluginName)});
@@ -860,9 +822,9 @@ const results = sources.map(source => {
   } catch (e) { return { error: e.message }; }
 });
 process.stdout.write(JSON.stringify(results));
-`,
-  );
-  return runBatchHelperAsync("node", [helper], sources, {
+`;
+  return runNodeBatch(helperSource, sources, {
+    label: "babelBatch",
     cwd: toolDir,
     env: { MATRIX_BABEL_OPTIONS: JSON.stringify(babelOptions) },
   });
@@ -872,12 +834,9 @@ export function babelMultiPluginBatch(sources, profile, plugins, env = {}) {
   const packages = [`@babel/core@${profile.core}`, ...plugins.map(([name, ver]) => `${name}@${ver}`)];
   const toolKey = `babel-${profile.core}-${plugins.map(([n]) => n.split("/").pop()).join("-")}`;
   const toolDir = ensureNodeTool(toolKey, packages);
-  const helper = join(toolDir, "babel-multi-batch.mjs");
   const pluginImports = plugins.map(([name], i) => `const p${i} = (await import(${JSON.stringify(name)})).default ?? (await import(${JSON.stringify(name)}));`).join("\n");
   const pluginList = plugins.map((_, i) => `p${i}`).join(", ");
-  writeFileSync(
-    helper,
-    `
+  const helperSource = `
 import fs from "node:fs";
 const babelModule = await import("@babel/core");
 const babel = babelModule.default ?? babelModule;
@@ -892,9 +851,12 @@ const results = sources.map(source => {
   } catch (e) { return { error: e.message }; }
 });
 process.stdout.write(JSON.stringify(results));
-`,
-  );
-  return runBatchHelperAsync("node", [helper], sources, { cwd: toolDir, env });
+`;
+  return runNodeBatch(helperSource, sources, {
+    label: "babelMultiPluginBatch",
+    cwd: toolDir,
+    env,
+  });
 }
 
 export function babelPresetEnvBatch(sources, options = {}) {
@@ -905,10 +867,7 @@ export function babelPresetEnvBatch(sources, options = {}) {
     `@babel/core@${coreVersion}`,
     `@babel/preset-env@${presetVersion}`,
   ]);
-  const helper = join(toolDir, "babel-preset-env-batch.mjs");
-  writeFileSync(
-    helper,
-    `
+  const helperSource = `
 import fs from "node:fs";
 const babelModule = await import("@babel/core");
 const presetEnvModule = await import("@babel/preset-env");
@@ -925,9 +884,9 @@ const results = sources.map(source => {
   } catch (e) { return { error: e.message }; }
 });
 process.stdout.write(JSON.stringify(results));
-`,
-  );
-  return runBatchHelperAsync("node", [helper], sources, {
+`;
+  return runNodeBatch(helperSource, sources, {
+    label: "babelPresetEnvBatch",
     cwd: toolDir,
     env: { MATRIX_TARGETS: JSON.stringify(targets) },
   });
@@ -939,10 +898,7 @@ export function tscBatch(sources, options = {}) {
   const version = options.version ?? "5";
   const toolName = version === "5" ? "typescript" : `typescript-${version}`;
   const toolDir = ensureNodeTool(toolName, [`typescript@${version}`]);
-  const helper = join(toolDir, "tsc-batch.cjs");
-  writeFileSync(
-    helper,
-    `
+  const helperSource = `
 const fs = require("node:fs");
 const ts = require("typescript");
 const target = process.env.MATRIX_TSC_TARGET || "ES5";
@@ -962,9 +918,10 @@ const results = sources.map(source => {
   } catch (e) { return { error: e.message }; }
 });
 process.stdout.write(JSON.stringify(results));
-`,
-  );
-  return runBatchHelperAsync("node", [helper], sources, {
+`;
+  return runNodeBatch(helperSource, sources, {
+    label: "tscBatch",
+    format: "commonjs",
     cwd: toolDir,
     env: {
       MATRIX_TSC_TARGET: target,
@@ -984,13 +941,10 @@ export function swcBatch(sources, options = {}) {
   const externalHelpers = options.externalHelpers ?? false;
   const toolDir = ensureNodeTool("swc", ["@swc/core@1"]);
   const variant = minify ? "minify" : externalHelpers ? "external" : "base";
-  const helper = join(toolDir, variant === "base" ? "swc-batch.cjs" : `swc-${variant}-batch.cjs`);
   const jscExtra =
     (externalHelpers ? ", externalHelpers: true" : "") +
     (minify ? ", minify: { compress: true, mangle: true }" : "");
-  writeFileSync(
-    helper,
-    `
+  const helperSource = `
 const fs = require("node:fs");
 const swc = require("@swc/core");
 const target = process.env.MATRIX_SWC_TARGET || "es5";
@@ -1006,9 +960,10 @@ const results = sources.map(source => {
   } catch (e) { return { error: e.message }; }
 });
 process.stdout.write(JSON.stringify(results));
-`,
-  );
-  return runBatchHelperAsync("node", [helper], sources, {
+`;
+  return runNodeBatch(helperSource, sources, {
+    label: "swcBatch",
+    format: "commonjs",
     cwd: toolDir,
     env: { MATRIX_SWC_TARGET: target },
   });
@@ -1018,10 +973,7 @@ export function esbuildBatch(sources, options = {}) {
   const target = options.target ?? "es2015";
   const minify = options.minify ?? false;
   const toolDir = ensureNodeTool("esbuild-0.28", ["esbuild@0.28.0"]);
-  const helper = join(toolDir, minify ? "esbuild-minify-batch.cjs" : "esbuild-batch.cjs");
-  writeFileSync(
-    helper,
-    `
+  const helperSource = `
 const fs = require("node:fs");
 const esbuild = require("esbuild");
 const target = process.env.MATRIX_ESBUILD_TARGET || "es2015";
@@ -1034,9 +986,10 @@ const results = sources.map(source => {
   } catch (e) { return { error: e.message }; }
 });
 process.stdout.write(JSON.stringify(results));
-`,
-  );
-  return runBatchHelperAsync("node", [helper], sources, {
+`;
+  return runNodeBatch(helperSource, sources, {
+    label: "esbuildBatch",
+    format: "commonjs",
     cwd: toolDir,
     env: { MATRIX_ESBUILD_TARGET: target },
   });
@@ -1046,10 +999,7 @@ export function terserBatch(sources, options = {}) {
   const mangle = options.mangle ?? false;
   const toolDir = ensureNodeTool("terser", ["terser@5"]);
   const suffix = mangle ? "mangle-batch" : "batch";
-  const helper = join(toolDir, `terser-${suffix}.mjs`);
-  writeFileSync(
-    helper,
-    `
+  const helperSource = `
 import fs from "node:fs";
 import { minify } from "terser";
 const mangle = ${mangle};
@@ -1067,9 +1017,11 @@ for (const source of sources) {
   } catch (e) { results.push({ error: e.message }); }
 }
 process.stdout.write(JSON.stringify(results));
-`,
-  );
-  return runBatchHelperAsync("node", [helper], sources, { cwd: toolDir });
+`;
+  return runNodeBatch(helperSource, sources, {
+    label: "terserBatch",
+    cwd: toolDir,
+  });
 }
 
 export function withTerserVariants(name, allSources, runRaw, options = {}) {

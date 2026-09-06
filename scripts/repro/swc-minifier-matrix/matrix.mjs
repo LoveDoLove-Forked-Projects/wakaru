@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 
+import { runNodeBatchSync } from "../lib/tool-process.mjs";
+
 import {
   runMatrix, batchRunner, ensureNodeTool,
 } from "../lib/runner.mjs";
 import { mangleValidator } from "../lib/compare.mjs";
-import { join } from "node:path";
-import { writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 
 const profiles = [
   {
@@ -293,10 +292,7 @@ export const view = UserCard(props);
 // SWC minifier batch
 function swcMinifyBatch(sources, options) {
   const toolDir = ensureNodeTool("swc", ["@swc/core@1"]);
-  const helper = join(toolDir, "swc-minify-batch.cjs");
-  writeFileSync(
-    helper,
-    `
+  const helperSource = `
 const fs = require("node:fs");
 const swc = require("@swc/core");
 const options = JSON.parse(process.env.SWC_MINIFY_OPTIONS);
@@ -311,23 +307,13 @@ const results = sources.map(source => {
   } catch (e) { return { error: e.message }; }
 });
 process.stdout.write(JSON.stringify(results));
-`,
-  );
-  const result = spawnSync("node", [helper], {
+`;
+  return runNodeBatchSync(helperSource, sources, {
+    label: "swc-minify-batch.cjs",
+    format: "commonjs",
     cwd: toolDir,
-    input: JSON.stringify(sources),
-    encoding: "utf8",
-    maxBuffer: 1024 * 1024 * 50,
-    env: { ...process.env, SWC_MINIFY_OPTIONS: JSON.stringify(options) },
+    env: { SWC_MINIFY_OPTIONS: JSON.stringify(options) },
   });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`swc batch exited ${result.status}: ${result.stderr}`);
-  const outputs = JSON.parse(result.stdout);
-  const map = new Map();
-  for (let i = 0; i < sources.length; i++) {
-    map.set(sources[i], outputs[i].error ? new Error(outputs[i].error) : outputs[i].code);
-  }
-  return map;
 }
 
 const allSources = snippets.map((s) => s.source);
