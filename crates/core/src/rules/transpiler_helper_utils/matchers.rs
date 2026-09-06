@@ -30,6 +30,12 @@ pub(super) fn detect_helper_from_var_decl(
     let init = decl.init.as_ref()?;
     let key = var_declarator_binding_key(decl)?;
 
+    // TypeScript 5.9 wraps __importStar in a zero-argument ownKeys factory.
+    // Its raw TS marker and fallback-body proof already identify this helper.
+    if ts_expr_matches_helper_kind(init, TsHelperKind::ImportStar) {
+        return Some((key, TranspilerHelperKind::InteropRequireWildcard));
+    }
+
     // var _ird = function(obj) { ... }
     if let Expr::Fn(fn_expr) = init.as_ref() {
         if let Some(kind) = detect_helper_from_fn(&fn_expr.function, has_sub_helpers) {
@@ -758,7 +764,9 @@ fn matches_if_return_form(stmts: &[Stmt], ctx: &MatchContext) -> bool {
 }
 /// Matches: obj && obj.__esModule
 fn matches_esmodule_test(expr: &Expr, ctx: &MatchContext) -> bool {
-    let Expr::Bin(bin) = expr else { return false };
+    let Expr::Bin(bin) = strip_parens(expr) else {
+        return false;
+    };
     if bin.op != BinaryOp::LogicalAnd {
         return false;
     }

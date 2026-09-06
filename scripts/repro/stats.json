@@ -2,9 +2,9 @@
   "commit": "9ebe9e52",
   "date": "2026-09-05",
   "aggregate": {
-    "yes": 1895,
+    "yes": 1897,
     "total": 1969,
-    "pct": 96.2
+    "pct": 96.3
   },
   "matrices": [
     {
@@ -105,11 +105,11 @@
     },
     {
       "name": "tslib-helpers",
-      "yes": 85,
-      "no": 26,
+      "yes": 87,
+      "no": 24,
       "error": 0,
       "total": 111,
-      "pct": 76.6
+      "pct": 78.4
     }
   ]
 }

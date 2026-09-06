@@ -814,3 +814,13 @@ console.log(o.Component);
     let output = render(input);
     insta::assert_snapshot!(output);
 }
+
+#[test]
+fn typescript_parenthesized_interop_test_restores_default_import() {
+    let input = include_str!("fixtures/tslib-interop/generated/default.js");
+    let focused = common::render_rule(input, |_| wakaru_core::rules::UnInteropRequireDefault);
+    assert!(!focused.contains("__importDefault(require("), "{focused}");
+    let output = render(input);
+    assert!(!output.contains("__importDefault"), "{output}");
+    assert!(output.contains("from \"./provider\""), "{output}");
+}

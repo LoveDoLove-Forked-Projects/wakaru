@@ -53,14 +53,15 @@ runtime compatibility. The script-only execution harness cannot run these
 modules; no `execute` check is claimed. The matrix does not install or execute
 tslib itself. Runtime behavior tests remain separate from this recovery score.
 
-The current baseline has **85 yes / 26 no / 0 errors across 111 distinct
+The current baseline has **87 yes / 24 no / 0 errors across 111 distinct
 shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
 
 - External private-field helpers remain; mangled inline helpers also remain.
 - Compressed array-destructuring cases retain iterator helpers.
 - Inheritance recovery retains its IIFE when members still capture the
   superclass parameter; full superclass recovery remains incomplete.
-- Some current inline interop helper bodies are not recognized.
+- Compressed inline import-star factories remain; the raw TypeScript 5.9
+  factory and parenthesized import-default body are recognized.
 
 The original tslib awaiter regression passes all 18 ES5/ES2015 profiles.
 Tagged templates and generator delegation now pass across inline, namespace,

@@ -481,7 +481,7 @@ fn ts_inline_helper_fallback_matches(expr: &Expr, kind: TsHelperKind) -> bool {
     }
 }
 fn ts_helper_callable_body(expr: &Expr) -> Option<(usize, &[Stmt])> {
-    match expr {
+    match strip_parens(expr) {
         Expr::Fn(fn_expr) => {
             let body = fn_expr.function.body.as_ref()?;
             Some((fn_expr.function.params.len(), body.stmts.as_slice()))
