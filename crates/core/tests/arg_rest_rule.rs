@@ -627,3 +627,185 @@ fn last_rest_param_context(function: &Function) -> SyntaxContext {
     };
     id.ctxt
 }
+
+// --- nested arrows read the enclosing function's `arguments` ---
+
+#[test]
+fn nested_arrow_reading_mapped_index_blocks_rest() {
+    // The arrow reads `arguments[0]`, which is mapped to `a` while the
+    // parameter list is simple. Adding a rest parameter would unmap it and
+    // `g()` would return 1 instead of 2.
+    let input = r#"
+function f(a) {
+    var g = () => arguments[0];
+    a = 2;
+    return [arguments[1], g()];
+}
+"#;
+    assert_eq_normalized(&apply(input), input);
+}
+
+#[test]
+fn nested_arrow_tail_index_is_rewritten_with_body() {
+    let input = r#"
+function f(a) {
+    var g = () => arguments[1];
+    return [arguments[1], g()];
+}
+"#;
+    let expected = r#"
+function f(a, ...args) {
+    var g = () => args[0];
+    return [args[0], g()];
+}
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
+
+#[test]
+fn nested_arrow_arguments_length_is_rewritten_in_parameterless_function() {
+    let input = r#"
+function f() {
+    var count = () => arguments.length;
+    return count() + arguments[0];
+}
+"#;
+    let expected = r#"
+function f(...args) {
+    var count = () => args.length;
+    return count() + args[0];
+}
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
+
+#[test]
+fn arguments_in_default_parameter_blocks_rest() {
+    let input = r#"
+function f(a = arguments.length) {
+    return arguments[1];
+}
+"#;
+    assert_eq_normalized(&apply(input), input);
+}
+
+#[test]
+fn existing_args_binding_gets_a_fresh_rest_name() {
+    // `args[0]` would be captured by the local declaration after printing.
+    let input = r#"
+function f() {
+    var args = 1;
+    return arguments[0] + args;
+}
+"#;
+    let expected = r#"
+function f(...args_1) {
+    var args = 1;
+    return args_1[0] + args;
+}
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
+
+#[test]
+fn nested_arrow_param_named_args_gets_a_fresh_rest_name() {
+    let input = r#"
+function f() {
+    var g = (args) => arguments[0] + args;
+    return g(arguments[1]);
+}
+"#;
+    let expected = r#"
+function f(...args_1) {
+    var g = (args) => args_1[0] + args;
+    return g(args_1[1]);
+}
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
+
+#[test]
+fn outer_args_reference_gets_a_fresh_rest_name() {
+    // The arrow reads the module-level `args`; a rest parameter spelled `args`
+    // would shadow it.
+    let input = r#"
+const args = 9;
+function f() {
+    return () => [arguments[0], args];
+}
+"#;
+    let expected = r#"
+const args = 9;
+function f(...args_1) {
+    return () => [args_1[0], args];
+}
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
+
+#[test]
+fn fresh_rest_name_skips_taken_suffixes() {
+    let input = r#"
+function f(args, args_1) {
+    return arguments[2];
+}
+"#;
+    let expected = r#"
+function f(args, args_1, ...args_2) {
+    return args_2[0];
+}
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
+
+#[test]
+fn nested_class_constructor_arguments_not_conflated() {
+    // A constructor has its own `arguments`: it gets its own rest parameter,
+    // and it must neither enable nor be rewritten by the enclosing function's
+    // rest recovery (`f` stays parameterless).
+    let input = r#"
+function f() {
+    class A {
+        constructor() {
+            if (arguments.length < 1) throw new TypeError("required");
+            this.value = arguments[0];
+        }
+    }
+    return A;
+}
+"#;
+    let expected = r#"
+function f() {
+    class A {
+        constructor(...args) {
+            if (args.length < 1) throw new TypeError("required");
+            this.value = args[0];
+        }
+    }
+    return A;
+}
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
+
+#[test]
+fn class_constructor_inside_nested_arrow_not_conflated() {
+    // With one fixed parameter and an `arguments.length` read the constructor
+    // keeps `arguments`; the arrow traversal must not attribute that read to
+    // `f` either.
+    let input = r#"
+function f() {
+    const install = () => {
+        class A {
+            constructor(y) {
+                if (arguments.length < 1) throw new TypeError("required");
+                this.value = y;
+            }
+        }
+        return A;
+    };
+    return install();
+}
+"#;
+    assert_eq_normalized(&apply(input), input);
+}

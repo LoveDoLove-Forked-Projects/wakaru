@@ -1,9 +1,11 @@
+use std::collections::HashSet;
+
 use swc_core::atoms::Atom;
 use swc_core::common::DUMMY_SP;
 use swc_core::ecma::ast::{
-    ArrowExpr, AssignOp, AssignTarget, BinaryOp, BindingIdent, Callee, Constructor, Decl, Expr,
-    Function, FunctionBody, Ident, Lit, MemberExpr, MemberProp, Number, Param, ParamOrTsParamProp,
-    Pat, RestPat, SimpleAssignTarget, Stmt, UpdateOp, VarDeclKind, VarDeclOrExpr,
+    AssignOp, AssignTarget, BinaryOp, BindingIdent, Callee, Constructor, Decl, Expr, Function,
+    FunctionBody, Ident, Lit, MemberExpr, MemberProp, Number, Param, ParamOrTsParamProp, Pat,
+    RestPat, SimpleAssignTarget, Stmt, UpdateOp, VarDeclKind, VarDeclOrExpr,
 };
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
@@ -53,6 +55,11 @@ impl VisitMut for ArgRest {
         if has_direct_use_strict_directive(body) {
             return;
         }
+        // A parameter initializer that reads `arguments` runs before the rest
+        // binding exists, and a mapped index it reads would change meaning.
+        if mentions_arguments(&func.params) {
+            return;
+        }
         let original = contains_use_strict_string_statement(body).then(|| func.clone());
         let fixed_param_count = func.params.len();
 
@@ -66,7 +73,7 @@ impl VisitMut for ArgRest {
 
         let rest_ident = copy_var
             .clone()
-            .unwrap_or_else(|| Ident::new_no_ctxt("args".into(), DUMMY_SP));
+            .unwrap_or_else(|| Ident::new_no_ctxt(fresh_rest_name(body, &func.params), DUMMY_SP));
         func.params.push(make_rest_param(rest_ident.clone()));
 
         // Rewrite `arguments` → rest param in the body
@@ -110,6 +117,9 @@ impl VisitMut for ArgRest {
         if has_direct_use_strict_directive(body) {
             return;
         }
+        if mentions_arguments(&ctor.params) {
+            return;
+        }
         let original = contains_use_strict_string_statement(body).then(|| ctor.clone());
         let fixed_param_count = ctor.params.len();
 
@@ -123,7 +133,7 @@ impl VisitMut for ArgRest {
 
         let rest_ident = copy_var
             .clone()
-            .unwrap_or_else(|| Ident::new_no_ctxt("args".into(), DUMMY_SP));
+            .unwrap_or_else(|| Ident::new_no_ctxt(fresh_rest_name(body, &ctor.params), DUMMY_SP));
         ctor.params.push(ParamOrTsParamProp::Param(make_rest_param(
             rest_ident.clone(),
         )));
@@ -624,9 +634,67 @@ impl Visit for ArgumentsChecker {
         }
     }
 
-    // Don't descend into nested functions — they have their own `arguments`
+    // Don't descend into nested functions or class constructors — they have
+    // their own `arguments`. Arrows have none and read this function's object,
+    // so the default traversal covers them.
     fn visit_function(&mut self, _: &Function) {}
-    fn visit_arrow_expr(&mut self, _: &ArrowExpr) {}
+    fn visit_constructor(&mut self, _: &Constructor) {}
+}
+
+/// True when any node in `node` mentions `arguments` from the enclosing
+/// function's activation: nested arrows count, nested functions do not.
+fn mentions_arguments<N: VisitWith<ArgumentsMentionDetector>>(node: &N) -> bool {
+    let mut detector = ArgumentsMentionDetector { found: false };
+    node.visit_with(&mut detector);
+    detector.found
+}
+
+struct ArgumentsMentionDetector {
+    found: bool,
+}
+
+impl Visit for ArgumentsMentionDetector {
+    fn visit_ident(&mut self, id: &Ident) {
+        if id.sym == "arguments" {
+            self.found = true;
+        }
+    }
+
+    fn visit_function(&mut self, _: &Function) {}
+    fn visit_constructor(&mut self, _: &Constructor) {}
+}
+
+/// Picks the rest parameter name: `args`, or `args_1`, `args_2`, ... when the
+/// body or parameter list already spells that identifier anywhere (a
+/// declaration, or a reference to an outer binding). Printed JavaScript has no
+/// `SyntaxContext`, so a rest parameter with a spelled name would either be
+/// captured by an inner declaration at a rewritten use site or capture an
+/// existing reference to the outer binding.
+fn fresh_rest_name<P: VisitWith<IdentNameCollector>>(body: &FunctionBody, params: &P) -> Atom {
+    let mut collector = IdentNameCollector {
+        names: HashSet::new(),
+    };
+    body.visit_with(&mut collector);
+    params.visit_with(&mut collector);
+
+    let preferred: Atom = "args".into();
+    if !collector.names.contains(&preferred) {
+        return preferred;
+    }
+    (1usize..)
+        .map(|suffix| Atom::from(format!("{preferred}_{suffix}")))
+        .find(|candidate| !collector.names.contains(candidate))
+        .expect("an unused suffix exists")
+}
+
+struct IdentNameCollector {
+    names: HashSet<Atom>,
+}
+
+impl Visit for IdentNameCollector {
+    fn visit_ident(&mut self, ident: &Ident) {
+        self.names.insert(ident.sym.clone());
+    }
 }
 
 fn is_arguments_ident(expr: &Expr) -> bool {
@@ -846,9 +914,10 @@ impl VisitMut for ArgumentsRewriter {
         expr.visit_mut_children_with(self);
     }
 
-    // Don't descend into nested functions
+    // Don't descend into nested functions or class constructors; arrows read
+    // this function's `arguments` and are rewritten along with the body.
     fn visit_mut_function(&mut self, _: &mut Function) {}
-    fn visit_mut_arrow_expr(&mut self, _: &mut ArrowExpr) {}
+    fn visit_mut_constructor(&mut self, _: &mut Constructor) {}
 }
 
 fn is_safe_arguments_index(expr: &Expr, fixed_param_count: usize) -> bool {

@@ -334,7 +334,14 @@ rationale, or level gating appear.
   that is later written ships a runtime `TypeError`.
 - **ArgRest → UnRestArrayCopy** — hard chain: UnRestArrayCopy detects the
   Babel copy loop for rest params that ArgRest just created. ArgRest is
-  `standard+`.
+  `standard+`. Nested arrows read the enclosing function's `arguments`, so
+  they are checked and rewritten with the body; nested regular functions and
+  class constructors have their own `arguments` and are skipped (a constructor
+  is a separate AST node, not a `Function`). A parameter initializer that
+  mentions `arguments` blocks the rewrite. The fresh rest name is `args`, or
+  `args_1`, `args_2`, ... when the body or parameter list already spells that
+  identifier anywhere (a declaration or a reference to an outer binding),
+  since printed code has no `SyntaxContext` to keep them apart.
 - **ObjMethodShorthand / ArrowFunction** — both consult the shared
   constructor-sensitive value analysis before replacing ordinary function
   values with non-constructible method or arrow syntax. The analysis recognizes
