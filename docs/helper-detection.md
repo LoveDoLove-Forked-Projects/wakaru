@@ -223,6 +223,17 @@ no provenance. Calling a recovered `.default` binding also relies on the
 `call_receiver_independence` assumption documented in
 [rewrite-assumptions.md](rewrite-assumptions.md).
 
+### Compressed TypeScript import-star factories
+
+TypeScript 5.9's inline `__importStar` uses an `ownKeys` factory. Terser can
+lift its local variable and turn the factory IIFE into a sequence expression.
+Detection accepts that form only when its prefix assigns a function to a
+single uninitialized `var` used exclusively by the helper declaration. An
+external read/write, lexical declaration, extra prefix effect, `eval`, or
+`with` prevents recognition, so helper cleanup cannot erase observable
+initialization. This module-wide proof belongs in the helper collector; the
+per-expression body matcher cannot establish that the lifted variable is private.
+
 ### Where it runs in the pipeline
 
 Helper detection and restoration runs within **Stage 2** of the `apply_rules()` pipeline, after Stage 1 syntax normalization. Stage 1 rules like `UnIndirectCall` and `UnBracketNotation` must run first to normalize patterns like `(0, x.default)()` and `["default"]` before helper detection can match reliably.

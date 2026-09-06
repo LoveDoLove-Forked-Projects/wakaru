@@ -58,6 +58,12 @@ pub(super) fn collect_transpiler_helpers_inner(
                         detect_helper_from_var_decl(decl, has_sub_helpers, unresolved_mark)
                     {
                         helpers.insert(key, kind);
+                    } else if let Some(key) = super::ts_helpers::detect_ts_import_star_sequence(
+                        module,
+                        decl,
+                        unresolved_mark,
+                    ) {
+                        helpers.insert(key, TranspilerHelperKind::InteropRequireWildcard);
                     }
                 }
             }

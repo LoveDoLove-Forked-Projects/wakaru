@@ -392,6 +392,109 @@ pub(super) fn detect_helper_from_tslib_require_member(
     }
     tslib_helper_name_kind(static_member_prop_name(&member.prop)?)
 }
+// Terser lifts the ownKeys factory local and replaces the IIFE with a
+// sequence. Its initialization can be discarded only while the lifted var
+// remains private to this helper declaration.
+pub(super) fn detect_ts_import_star_sequence(
+    module: &Module,
+    decl: &VarDeclarator,
+    unresolved_mark: Option<Mark>,
+) -> Option<BindingKey> {
+    let key = var_declarator_binding_key(decl)?;
+    let ("__importStar", fallback) = ts_inline_helper_parts(decl.init.as_deref()?)? else {
+        return None;
+    };
+    let Expr::Seq(sequence) = strip_parens(fallback) else {
+        return None;
+    };
+    let [initialize, callable] = sequence.exprs.as_slice() else {
+        return None;
+    };
+    let Expr::Assign(assign) = strip_parens(initialize) else {
+        return None;
+    };
+    if assign.op != swc_core::ecma::ast::AssignOp::Assign {
+        return None;
+    }
+    let swc_core::ecma::ast::AssignTarget::Simple(swc_core::ecma::ast::SimpleAssignTarget::Ident(
+        binding,
+    )) = &assign.left
+    else {
+        return None;
+    };
+    let own_keys = binding_key(&binding.id);
+    let Expr::Fn(factory) = strip_parens(&assign.right) else {
+        return None;
+    };
+    let Expr::Fn(helper) = strip_parens(callable) else {
+        return None;
+    };
+    if factory.function.is_async
+        || factory.function.is_generator
+        || helper.function.is_async
+        || helper.function.is_generator
+        || factory.function.params.len() != 1
+        || helper.function.params.len() != 1
+    {
+        return None;
+    }
+    let factory_signals = collect_ts_helper_body_signals(&factory.function.body.as_ref()?.stmts);
+    let helper_signals = collect_ts_helper_body_signals(&helper.function.body.as_ref()?.stmts);
+    if !factory_signals.own_keys_loop
+        || !factory_signals.has_own_property
+        || !helper_signals.es_module_prop
+    {
+        return None;
+    }
+    let mut declarations = 0;
+    for item in &module.body {
+        if let ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) = item {
+            for candidate in &var.decls {
+                if var_declarator_binding_key(candidate).as_ref() == Some(&own_keys) {
+                    if var.kind != swc_core::ecma::ast::VarDeclKind::Var || candidate.init.is_some()
+                    {
+                        return None;
+                    }
+                    declarations += 1;
+                }
+            }
+        }
+    }
+    if declarations != 1 {
+        return None;
+    }
+    struct DynamicLookup {
+        unresolved_mark: Option<Mark>,
+        found: bool,
+    }
+    impl Visit for DynamicLookup {
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            if matches!(&call.callee, Callee::Expr(callee) if matches!(strip_parens(callee), Expr::Ident(id) if is_unresolved_or_unguarded_ident(id, "eval", self.unresolved_mark)))
+            {
+                self.found = true;
+            }
+            call.visit_children_with(self);
+        }
+        fn visit_with_stmt(&mut self, _: &swc_core::ecma::ast::WithStmt) {
+            self.found = true;
+        }
+    }
+    let mut dynamic = DynamicLookup {
+        unresolved_mark,
+        found: false,
+    };
+    module.visit_with(&mut dynamic);
+    if dynamic.found {
+        return None;
+    }
+    let remaining = super::remaining_refs_outside_var_declarators(
+        module,
+        &HashSet::from([own_keys.clone()]),
+        &HashSet::from([key.clone(), own_keys]),
+    );
+    remaining.is_empty().then_some(key)
+}
+
 fn ts_inline_helper_kind(expr: &Expr) -> Option<TsHelperKind> {
     let (name, fallback) = ts_inline_helper_parts(expr)?;
     let kind = ts_helper_name_kind(name)?;

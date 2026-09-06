@@ -65,19 +65,18 @@ runtime compatibility. The script-only execution harness cannot run these
 modules; no `execute` check is claimed. The matrix does not install or execute
 tslib itself. Runtime behavior tests remain separate from this recovery score.
 
-The current baseline has **97 yes / 17 no / 0 errors across 114 distinct
+The current baseline has **99 yes / 15 no / 0 errors across 114 distinct
 shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
 
 - Compressed array-destructuring cases retain iterator helpers.
 - Inheritance recovery retains its IIFE when members still capture the
   superclass parameter; full superclass recovery remains incomplete.
-- Compressed inline import-star factories remain; the raw TypeScript 5.9
-  factory and parenthesized import-default body are recognized.
 
 The original tslib awaiter regression passes all 18 ES5/ES2015 profiles.
 The mixed producer adds three passing async shapes (raw and both Terser variants).
 Tagged templates and generator delegation now pass across inline, namespace,
-and named-import profiles.
+and named-import profiles. Private fields pass all nine delivery/minifier
+shapes; both interop snippets pass every applicable CommonJS shape.
 Fixes should turn their failing shapes into `yes`; regenerate `stats.json`
 and its README/website aggregate when measured numbers change. A falling
 aggregate after adding challenge rows does not mean existing recovery regressed.

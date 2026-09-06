@@ -370,3 +370,31 @@ fn typescript_factory_preserves_shared_helper_dependencies() {
     assert!(!output.contains("__importStar"), "{output}");
     assert!(output.contains("var __createBinding"), "{output}");
 }
+
+#[test]
+fn compressed_typescript_own_keys_factory_restores_namespace_import() {
+    for input in [
+        include_str!("fixtures/tslib-interop/generated/star-compressed.js"),
+        include_str!("fixtures/tslib-interop/generated/star-mangled.js"),
+    ] {
+        let focused = common::render_rule(input, |_| wakaru_core::rules::UnInteropRequireWildcard);
+        assert!(!focused.contains("this.__importStar"), "{focused}");
+        assert!(focused.contains("import * as"), "{focused}");
+        let output = render(input);
+        assert!(!output.contains("getOwnPropertyNames"), "{output}");
+    }
+}
+
+#[test]
+fn compressed_import_star_keeps_observable_factory_initialization() {
+    let input = include_str!("fixtures/tslib-interop/generated/star-compressed.js");
+    for input in [
+        format!("{input}\nuse(ownKeys);"),
+        format!("{input}\neval('ownKeys');"),
+        input.replace("ownKeys=function", "ownKeys=effect(),other=function"),
+        input.replace(",ownKeys;", ";let ownKeys;"),
+    ] {
+        let output = common::render_rule(&input, |_| wakaru_core::rules::UnInteropRequireWildcard);
+        assert!(output.contains("this.__importStar"), "{output}");
+    }
+}
