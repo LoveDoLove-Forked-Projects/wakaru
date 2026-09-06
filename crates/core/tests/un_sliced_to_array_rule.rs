@@ -1165,7 +1165,7 @@ const tuple = sliced(...args);
 }
 
 #[test]
-fn indexed_expression_keeps_iterator_materialization() {
+fn complete_indexed_return_recovers_a_destructuring_group() {
     let input = r#"
 import { __read } from "tslib";
 function read(items) {
@@ -1174,8 +1174,11 @@ function read(items) {
 }
 "#;
     let output = common::render_rule(input, |_| UnSlicedToArray::new());
-    assert_eq_normalized(&output, input);
-    assert!(render(input).contains("__read(items, 2)"));
+    assert_eq_normalized(
+        &output,
+        "function read(items) { var [_item, _item2] = items; return _item + _item2; }",
+    );
+    assert!(!render(input).contains("__read(items, 2)"));
 }
 
 #[test]
@@ -1184,6 +1187,133 @@ fn escaping_zero_length_result_keeps_its_binding() {
 import { __read } from "tslib";
 var result = __read(items, 0);
 consume(result);
+"#;
+    assert_eq_normalized(
+        &common::render_rule(input, |_| UnSlicedToArray::new()),
+        input,
+    );
+}
+
+#[test]
+fn incomplete_or_observable_indexed_returns_keep_materialization() {
+    for body in [
+        "return pair[0];",
+        "return pair[1] + pair[0];",
+        "return pair[0] + pair[0];",
+        "return pair[0] + pair[2];",
+        "return pair[0] + consume(pair[1]);",
+        "return pair[0] || pair[1];",
+        "return pair[0] + (() => pair[1])();",
+        "return pair[0] + pair[1]++;",
+        "consume(pair); return pair[0] + pair[1];",
+        "return pair[0] + pair[1]; function later() { return pair; }",
+        "eval('pair'); return pair[0] + pair[1];",
+        "with (scope) { return pair[0] + pair[1]; }",
+    ] {
+        let input = format!("import {{ __read }} from 'tslib'; function read(items) {{ var pair = __read(items, 2); {body} }}");
+        assert_eq_normalized(
+            &common::render_rule(&input, |_| UnSlicedToArray::new()),
+            &input,
+        );
+    }
+}
+
+#[test]
+fn indexed_return_requires_stable_helper_identity() {
+    for (header, callee) in [
+        ("function custom(items, n) { return items; }", "custom"),
+        ("var h = require('tslib').__read; h = custom;", "h"),
+        (
+            "var h = require('tslib').__read; function replace() { h = custom; }",
+            "h",
+        ),
+        (
+            "var ts = require('tslib'); ts.__read = custom;",
+            "ts.__read",
+        ),
+        ("var ts = require('tslib'); consume(ts);", "ts.__read"),
+        ("var ts = require('tslib'); var ts = custom;", "ts.__read"),
+        ("var h = require('tslib').__read; var h = custom;", "h"),
+    ] {
+        let input = format!("{header} function read(items) {{ var pair = {callee}(items, 2); return pair[0] + pair[1]; }}");
+        assert_eq_normalized(
+            &common::render_rule(&input, |_| UnSlicedToArray::new()),
+            &input,
+        );
+    }
+}
+
+#[test]
+fn indexed_return_generated_names_do_not_capture_existing_names() {
+    let input = "import { __read } from 'tslib'; function read(items, _item) { var pair = __read(items, 2); return pair[0] + pair[1]; } function other() { return _item2; }";
+    let expected = "function read(items, _item) { var [_item3, _item4] = items; return _item3 + _item4; } function other() { return _item2; }";
+    assert_eq_normalized(
+        &common::render_rule(input, |_| UnSlicedToArray::new()),
+        expected,
+    );
+}
+
+#[test]
+fn minimal_indexed_return_retains_materialization() {
+    let input = "import { __read } from 'tslib'; function read(items) { var pair = __read(items, 2); return pair[0] + pair[1]; }";
+    assert_eq_normalized(
+        &common::render_rule(input, |_| {
+            UnSlicedToArray::new_with_level(RewriteLevel::Minimal)
+        }),
+        input,
+    );
+}
+
+#[test]
+fn indexed_return_requires_matching_limit_and_preserves_hoisted_vars() {
+    let input = "import { __read } from 'tslib'; function read(items) { var pair = __read(items, 2); var unused; return pair[0] + pair[1]; }";
+    let expected =
+        "function read(items) { var [_item, _item2] = items; var unused; return _item + _item2; }";
+    assert_eq_normalized(
+        &common::render_rule(input, |_| UnSlicedToArray::new()),
+        expected,
+    );
+    for limit in ["3", "count", "2.5", "...counts"] {
+        let input = input.replace("items, 2", &format!("items, {limit}"));
+        assert_eq_normalized(
+            &common::render_rule(&input, |_| UnSlicedToArray::new()),
+            &input,
+        );
+    }
+    let input = "import { __read } from 'tslib'; function read(items) { var pair = __read(items, 3); return pair[0] + (pair[1] * pair[2]); }";
+    let expected = "function read(items) { var [_item, _item2, _item3] = items; return _item + _item2 * _item3; }";
+    assert_eq_normalized(
+        &common::render_rule(input, |_| UnSlicedToArray::new()),
+        expected,
+    );
+}
+
+#[test]
+fn indexed_return_tracks_shadowed_helpers_and_temporary_bindings() {
+    let input = "import { __read } from 'tslib'; function read(items) { var pair = __read(items, 2); return pair[0] + pair[1]; } function other(__read, pair) { __read = custom; return pair[0]; }";
+    let expected = "function read(items) { var [_item, _item2] = items; return _item + _item2; } function other(__read, pair) { __read = custom; return pair[0]; }";
+    assert_eq_normalized(
+        &common::render_rule(input, |_| UnSlicedToArray::new()),
+        expected,
+    );
+    let input = "import { __read } from 'tslib'; function read(items, __read) { var pair = __read(items, 2); return pair[0] + pair[1]; }";
+    let output = common::render_rule(input, |_| UnSlicedToArray::new());
+    assert!(output.contains("__read(items, 2)"), "{output}");
+}
+
+#[test]
+fn indexed_return_retains_array_like_wrapper_and_its_helper_argument() {
+    let input = r#"
+function _maybeArrayLike(r, a, e) {
+    if (a && !Array.isArray(a) && typeof a.length === "number") return a;
+    return r(a, e);
+}
+var sliced = require("@babel/runtime/helpers/slicedToArray");
+sliced = custom;
+function read(items) {
+    var pair = _maybeArrayLike(sliced, items, 2);
+    return pair[0] + pair[1];
+}
 "#;
     assert_eq_normalized(
         &common::render_rule(input, |_| UnSlicedToArray::new()),

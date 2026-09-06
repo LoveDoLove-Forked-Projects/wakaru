@@ -420,14 +420,18 @@ globalThis.observed = alias.Engine === Engine;
 }
 
 #[test]
-fn compressed_index_reads_keep_iterator_materialization() {
+fn compressed_index_reads_recover_complete_destructuring() {
     // TypeScript 5.9.3 importHelpers + Terser compress: the element bindings
-    // have been inlined into the return, so no later rule can consume them.
+    // have been inlined into the return; recovery must restore the full pattern.
     let input = r#"
 Object.defineProperty(exports,"__esModule",{value:!0}),exports.read=read;
 var tslib_1=require("tslib");
 function read(items){var _a=tslib_1.__read(items,2),a,b;return _a[0]+_a[1]}
 "#;
     let output = render(input);
-    assert!(output.contains(".__read(items, 2)"), "{output}");
+    assert!(!output.contains(".__read(items, 2)"), "{output}");
+    assert!(
+        output.contains("function read([") || output.contains("] = items;"),
+        "{output}"
+    );
 }

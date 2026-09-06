@@ -79,12 +79,15 @@ runtime compatibility. The script-only execution harness cannot run these
 modules; no `execute` check is claimed. The matrix does not install or execute
 tslib itself. Runtime behavior tests remain separate from this recovery score.
 
-The current baseline has **123 yes / 15 no / 0 errors across 138 distinct
+The current baseline has **129 yes / 9 no / 0 errors across 138 distinct
 shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
 
-- Compressed array-destructuring cases retain iterator helpers.
 - Inheritance recovery retains its IIFE when members still capture the
   superclass parameter; full superclass recovery remains incomplete.
+
+All nine array-read shapes recover complete destructuring, including the six
+compressed returns whose element bindings were inlined into indexed expressions.
+Incomplete or escaped materializations remain covered by negative rule tests.
 
 The original tslib awaiter regression passes all 18 ES5/ES2015 profiles.
 The mixed producers add six passing async shapes; the standalone SWC external

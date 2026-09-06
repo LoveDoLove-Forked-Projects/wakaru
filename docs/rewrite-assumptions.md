@@ -115,12 +115,20 @@ This assumption does not relax helper identity, reassignment, temporary-use,
 or complete-pattern checks. An unproven or reassigned helper call must remain.
 See [helper detection](helper-detection.md) for those proof requirements.
 
-Affects: `UnDestructuring` (complete sliced-helper groups with defaults).
+Compressed indexed returns recovered into complete patterns share the helper
+versus native iterator boundary. For example, TypeScript's `__read` calls the
+iterator's `return()` if a later `next()` throws after an earlier successful
+step; native destructuring propagates that error without closing the iterator.
+Recovering the pattern at `standard` accepts this source-recovery difference.
+
+Affects: `UnDestructuring` (complete sliced-helper groups with defaults) and
+`UnSlicedToArray` (compressed indexed returns recovered into complete patterns).
 `UnParameters2` may subsequently fold the recovered pattern into a parameter.
 
 Level: `standard` and above. `minimal` retains the helper materialization for
-these default groups. This documents the existing source-recovery policy; it
-does not broaden the matcher to incomplete patterns or arbitrary helper calls.
+these default groups and compressed indexed returns. These recoveries use the
+existing source-recovery policy; helper identity and complete-pattern checks
+remain required.
 
 ### `no_document_all`
 

@@ -284,10 +284,18 @@ loop, and return of that exact allocation. Near-matches with a different guard,
 source index, output binding, or shadowed `Array` remain untouched.
 
 `UnSlicedToArray` removes iterator materialization only together with a
-proven destructuring group. Indexed expressions, escaping temporary arrays,
-and incomplete groups retain their helper call; a later rule is not assumed
-to reconstruct a pattern. Zero-length calls also retain their binding if its
-result is still used. Groups with default elements are the one hand-off:
+proven destructuring group. At `standard` and above, an adjacent return made
+only of ordered `temp[0]` through `temp[N - 1]` reads and eager binary operators
+can recover a complete pattern with fresh, collision-free element bindings.
+This path accepts direct two-argument helper calls, not `_maybeArrayLike`
+wrappers that pass a helper as an argument. The return must account for every
+use of the temporary. Consumed bindings must each have one declaration; the
+helper must remain stable, and namespace helpers must have only static member reads.
+Only hoisted `var` declarations without initializers may intervene. Calls,
+short-circuit expressions, escaped arrays, dynamic scope, and incomplete or
+reordered reads retain their helper call; `minimal` retains this compressed
+form too. A later rule is not assumed to reconstruct a pattern. Zero-length
+calls also retain their binding if their result is still used. Groups with default elements are the one hand-off:
 `UnSlicedToArray` skips them, and `UnDestructuring` drops the proven helper
 call when the rebuilt top-level pattern covers exactly the `N` elements the
 call materializes and has no rest element. `UnParameters2` then folds that

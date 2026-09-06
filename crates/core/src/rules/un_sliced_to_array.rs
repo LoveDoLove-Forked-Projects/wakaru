@@ -1,11 +1,14 @@
 use std::collections::HashSet;
 
+use crate::analysis::binding_uses::{BindingUseIndex, UseKind};
+use swc_core::atoms::Atom;
+
 use crate::facts::{ModuleFactsMap, TypeScriptHelperKind};
 use crate::utils::paren::strip_parens;
 use swc_core::common::{Mark, Spanned, SyntaxContext, DUMMY_SP};
 use swc_core::ecma::ast::{
     ArrayPat, ArrowExpr, ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp,
-    BindingIdent, Callee, Decl, Expr, ExprStmt, Function, FunctionBody, Lit, MemberExpr,
+    BindingIdent, Callee, Decl, Expr, ExprStmt, Function, FunctionBody, Ident, Lit, MemberExpr,
     MemberProp, Module, ModuleItem, Param, Pat, ReturnStmt, SimpleAssignTarget, Stmt, VarDecl,
     VarDeclKind, VarDeclarator,
 };
@@ -168,12 +171,16 @@ fn run_un_sliced_to_array(
         return;
     }
     let maybe_array_like = collect_maybe_array_like_bindings(module);
+    let indexed_returns = (level >= RewriteLevel::Standard)
+        .then(|| IndexedReturnContext::collect(module))
+        .flatten();
     module.visit_mut_children_with(&mut SlicedToArrayRewriter {
         local_helpers,
         cross_module_helpers: &cross_module_helpers,
         maybe_array_like: &maybe_array_like,
         level,
         unresolved_mark,
+        indexed_returns,
     });
 
     local_helpers.remove_unused_ts_helper_bindings(module, TsHelperKind::Read);
@@ -214,6 +221,7 @@ struct SlicedToArrayRewriter<'a> {
     maybe_array_like: &'a HashSet<BindingKey>,
     level: RewriteLevel,
     unresolved_mark: Option<Mark>,
+    indexed_returns: Option<IndexedReturnContext>,
 }
 
 impl VisitMut for SlicedToArrayRewriter<'_> {
@@ -264,6 +272,189 @@ impl VisitMut for SlicedToArrayRewriter<'_> {
             self.level,
             self.unresolved_mark,
         );
+        if let Some(context) = &mut self.indexed_returns {
+            for start in 0..stmts.len() {
+                let Some(extraction) = extract_sliced_to_array_stmt(
+                    &stmts[start],
+                    self.local_helpers,
+                    self.cross_module_helpers,
+                    self.maybe_array_like,
+                    self.unresolved_mark,
+                ) else {
+                    continue;
+                };
+                context.try_fold(stmts, start, extraction);
+            }
+        }
+    }
+}
+
+/// A compressed return can recover only when it accounts for every use of
+/// the materialized array. Reserve all emitted names (including free and
+/// nested references), since resolver contexts alone do not prevent capture.
+/// At standard, this uses iterator_materialization_independence: equal N
+/// proves complete consumption, not identical helper/native iterator closing.
+struct IndexedReturnContext {
+    uses: BindingUseIndex,
+    names: HashSet<Atom>,
+}
+
+impl IndexedReturnContext {
+    fn collect(module: &Module) -> Option<Self> {
+        let mut eval = super::eval_utils::DirectEvalPresence::default();
+        module.visit_with(&mut eval);
+        if eval.found || super::un_async_await::module_has_with_stmt(module) {
+            return None;
+        }
+        #[derive(Default)]
+        struct Names {
+            names: HashSet<Atom>,
+        }
+        impl Visit for Names {
+            fn visit_ident(&mut self, ident: &Ident) {
+                self.names.insert(ident.sym.clone());
+            }
+        }
+        let mut names = Names::default();
+        module.visit_with(&mut names);
+        Some(Self {
+            uses: BindingUseIndex::collect(module),
+            names: names.names,
+        })
+    }
+
+    fn try_fold(&mut self, stmts: &mut [Stmt], start: usize, extraction: SlicedExtraction) {
+        let Some(length) = extraction.length.filter(|n| *n > 0) else {
+            return;
+        };
+        if extraction.source_ref.is_some() {
+            return;
+        }
+        let Stmt::Decl(Decl::Var(var)) = &stmts[start] else {
+            return;
+        };
+        let Some(Expr::Call(call)) = var.decls[0].init.as_deref() else {
+            return;
+        };
+        // Do not extend this proof through _maybeArrayLike(helper, source, N):
+        // that would also require proving the helper argument remains stable.
+        if call.args.len() != 2 || call.args.iter().any(|arg| arg.spread.is_some()) {
+            return;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return;
+        };
+        let stable = match strip_parens(callee) {
+            Expr::Ident(id) => {
+                self.uses.has_single_declaration(&id.to_id())
+                    && !self.uses.has_direct_write(&id.to_id())
+            }
+            Expr::Member(member) => matches!(member.obj.as_ref(), Expr::Ident(id)
+                if self.uses.has_single_declaration(&id.to_id())
+                    && self.uses.has_only_static_member_reads_any(&id.to_id())),
+            _ => false,
+        };
+        let key = extraction.ref_binding.id.to_id();
+        let uses = self.uses.use_sites(&key);
+        if !stable
+            || uses.len() != length
+            || uses
+                .iter()
+                .any(|site| site.kind != UseKind::ComputedMemberRead)
+            || !self.uses.has_single_declaration(&key)
+        {
+            return;
+        }
+        let Some(end) = (start + 1..stmts.len()).find(|&index| {
+            !matches!(&stmts[index],
+                Stmt::Decl(Decl::Var(var)) if var.kind == VarDeclKind::Var
+                    && var.decls.iter().all(|decl| decl.init.is_none())
+            )
+        }) else {
+            return;
+        };
+        let Stmt::Return(ReturnStmt {
+            arg: Some(expr), ..
+        }) = &stmts[end]
+        else {
+            return;
+        };
+        let mut next = 0;
+        if !ordered_index_return(expr, &extraction.ref_binding.id, &mut next) || next != length {
+            return;
+        }
+        let ctxt = SyntaxContext::empty().apply_mark(Mark::new());
+        let mut suffix = 0;
+        let bindings: Vec<_> = (0..length)
+            .map(|_| loop {
+                suffix += 1;
+                let name: Atom = if suffix == 1 {
+                    "_item".into()
+                } else {
+                    format!("_item{suffix}").into()
+                };
+                if self.names.insert(name.clone()) {
+                    break Ident::new(name, DUMMY_SP, ctxt);
+                }
+            })
+            .collect();
+        struct Replace<'a> {
+            bindings: &'a [Ident],
+            next: usize,
+        }
+        impl VisitMut for Replace<'_> {
+            fn visit_mut_expr(&mut self, expr: &mut Expr) {
+                if matches!(expr, Expr::Member(_)) {
+                    *expr = Expr::Ident(self.bindings[self.next].clone());
+                    self.next += 1;
+                } else {
+                    expr.visit_mut_children_with(self);
+                }
+            }
+        }
+        // The grammar above admits only ordered indexed reads and eager
+        // binary operators, so this traversal replaces exactly N reads.
+        stmts[end].visit_mut_with(&mut Replace {
+            bindings: &bindings,
+            next: 0,
+        });
+        let Stmt::Decl(Decl::Var(var)) = &mut stmts[start] else {
+            unreachable!()
+        };
+        var.decls[0].name = Pat::Array(ArrayPat {
+            span: DUMMY_SP,
+            elems: bindings
+                .into_iter()
+                .map(|id| Some(Pat::Ident(id.into())))
+                .collect(),
+            optional: false,
+            type_ann: None,
+        });
+        var.decls[0].init = Some(extraction.source);
+    }
+}
+
+fn ordered_index_return(expr: &Expr, reference: &Ident, next: &mut usize) -> bool {
+    match strip_parens(expr) {
+        Expr::Member(member) => {
+            if !matches!(member.obj.as_ref(), Expr::Ident(id) if id.to_id() == reference.to_id())
+                || member_index(member) != Some(*next)
+            {
+                return false;
+            }
+            *next += 1;
+            true
+        }
+        Expr::Bin(binary)
+            if !matches!(
+                binary.op,
+                BinaryOp::LogicalAnd | BinaryOp::LogicalOr | BinaryOp::NullishCoalescing
+            ) =>
+        {
+            ordered_index_return(&binary.left, reference, next)
+                && ordered_index_return(&binary.right, reference, next)
+        }
+        _ => false,
     }
 }
 
