@@ -238,6 +238,14 @@ impl BindingUseIndex {
         })
     }
 
+    /// A second declaration can replace a helper without an assignment
+    /// expression (`var helper = runtime; var helper = custom`).
+    pub(crate) fn has_single_declaration(&self, binding: &BindingId) -> bool {
+        self.bindings
+            .get(binding)
+            .is_some_and(|info| info.declarations.len() == 1)
+    }
+
     pub(crate) fn has_declaration(&self, binding: &BindingId) -> bool {
         self.bindings
             .get(binding)
@@ -888,6 +896,25 @@ mod tests {
         assert_eq!(index.use_count(&bar), 0);
         assert!(index.referenced_bindings().contains(&foo));
         assert!(!index.referenced_bindings().contains(&bar));
+    }
+
+    #[test]
+    fn single_declaration_proof_includes_imports_functions_and_var_redeclarations() {
+        for (source, single) in [
+            ("import * as helper from 'runtime'; helper._();", true),
+            ("var helper = runtime; helper._();", true),
+            (
+                "var helper = runtime; var helper = custom; helper._();",
+                false,
+            ),
+            ("function helper() {} var helper = custom; helper();", false),
+            ("helper._();", false),
+        ] {
+            let module = resolved(source);
+            let index = BindingUseIndex::collect(&module);
+            let helper = binding(&module, "helper");
+            assert_eq!(index.has_single_declaration(&helper), single, "{source}");
+        }
     }
 
     #[test]

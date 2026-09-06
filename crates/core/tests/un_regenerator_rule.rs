@@ -3092,6 +3092,7 @@ fn swc_namespace_async_recovery_preserves_unproven_or_mutated_callees() {
         "var helper = require(\"other-package\");",
         "var helper = require(\"@swc/helpers/_/_extends\");",
         "var helper = require(\"@swc/helpers/_/_async_to_generator\"); helper = custom;",
+        "var helper = require(\"@swc/helpers/_/_async_to_generator\"); var helper = custom;",
         "var helper = require(\"@swc/helpers/_/_async_to_generator\"); function replace() { helper = custom; }",
         "var helper = require(\"@swc/helpers/_/_async_to_generator\"); helper._ = custom;",
         "var helper = require(\"@swc/helpers/_/_async_to_generator\"); delete helper._;",

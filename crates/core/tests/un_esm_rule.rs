@@ -4107,6 +4107,7 @@ fn swc_async_runtime_require_preserves_its_namespace_export() {
 fn swc_async_runtime_unsafe_namespace_uses_keep_the_commonjs_boundary() {
     for effect in [
         "helper = custom;",
+        "var helper = custom;",
         "helper._ = custom;",
         "delete helper._;",
         "Object.defineProperty(helper, '_', { value: custom });",

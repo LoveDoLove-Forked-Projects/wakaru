@@ -172,7 +172,10 @@ preserves dynamic lookup and reassigned helper bindings.
 `require("@swc/helpers/_/_async_to_generator")` binding is a module object;
 its `_` member is the helper function. The shared context keeps those identities
 separate and also recognizes explicit namespace imports. Recovery requires
-only static `_` reads: replacement, property mutation/deletion, namespace escape,
+one declaration for the namespace binding and only static `_` reads: a second
+`var helper = custom` is a replacement even without an assignment expression.
+The shared binding-use index exposes this declaration proof separately from
+use classification. Replacement, property mutation/deletion, namespace escape,
 `with`, or direct `eval` retain the calls. Cleanup removes a helper only after
 all references have disappeared, including unsupported calls left behind.
 

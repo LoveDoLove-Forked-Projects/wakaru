@@ -110,7 +110,9 @@ fn run_un_regenerator(
             swc_members.clear();
         } else {
             let uses = crate::analysis::binding_uses::BindingUseIndex::collect(module);
-            swc_members.retain(|key| uses.has_only_static_member_reads(key, "_"));
+            swc_members.retain(|key| {
+                uses.has_single_declaration(key) && uses.has_only_static_member_reads(key, "_")
+            });
         }
     }
     let mut async_to_gen_default_members = Vec::new();
