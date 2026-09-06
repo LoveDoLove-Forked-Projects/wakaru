@@ -288,9 +288,17 @@ proven destructuring group. At `standard` and above, an adjacent return made
 of ordered `temp[0]` through `temp[N - 1]` reads and eager binary operators
 can recover a complete pattern with fresh, collision-free element bindings.
 After all `N` reads, the expression may also contain literal or identifier
-leaves, such as `temp[0] + temp[1] + other`. Such leaves before or between
-element reads remain unsupported: identifiers can throw or access global
-getters, and binary coercions can be observable.
+leaves, such as `temp[0] + temp[1] + other`. Leading and interleaved leaves
+remain outside the current shared grammar; this does not mean every such
+expression is unsafe. TypeScript's ordinary iterable `__read` path materializes
+a fresh array, but Babel/SWC sliced helpers can return the input array itself.
+For those fast paths, moving element reads into an earlier pattern can matter:
+with `items = [1, 2]`, if reading the global `other` sets `items[0] = 10` and
+returns `0`, `other + temp[0] + temp[1]` returns `12` when `temp` aliases
+`items`. Reading `[a, b] = items` before that return instead produces `3`.
+The position of `other` within the return did not change; the element reads
+moved ahead of it. Widening the shared grammar therefore needs to account for
+helper fast paths, rather than infer equivalence from `__read` alone.
 This path accepts direct two-argument helper calls, not `_maybeArrayLike`
 wrappers that pass a helper as an argument. The return must account for every
 use of the temporary. Consumed bindings must each have one declaration; the

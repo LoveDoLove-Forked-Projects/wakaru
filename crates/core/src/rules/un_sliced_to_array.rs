@@ -456,9 +456,11 @@ fn ordered_index_return(expr: &Expr, reference: &Ident, next: &mut usize, length
             ordered_index_return(&binary.left, reference, next, length)
                 && ordered_index_return(&binary.right, reference, next, length)
         }
-        // Do not move a free-name read, possible TDZ, or coercion between
-        // indexed reads across the new pattern. Suffix leaves stay after all
-        // elements, exactly where they were evaluated in the lowered return.
+        // Conservative grammar shared across helper kinds. Babel/SWC array
+        // fast paths can alias the input: an earlier global-name getter may
+        // mutate elements before the lowered indexed reads. A new pattern
+        // reads those elements first. Do not generalize from __read's
+        // usual fresh-array path.
         Expr::Ident(_)
         | Expr::Lit(Lit::Num(_) | Lit::Str(_) | Lit::Bool(_) | Lit::Null(_) | Lit::BigInt(_)) => {
             *next == length
