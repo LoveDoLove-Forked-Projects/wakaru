@@ -355,6 +355,13 @@ reference, initialized/redeclared/lexical local, extra prefix effect, `eval`,
 or `with` prevents recognition. Cleanup consumes the sequence only through
 that proven helper identity.
 
+After class recovery, a named tslib `__extends` import (including aliases) is
+removed only if it was referenced before this pass and has no remaining uses.
+Other specifiers, re-exports, and originally-unused imports are retained.
+Dynamic lookup disables this cleanup. Removing the last specifier leaves
+`import "tslib"` to preserve module evaluation; namespace imports are unchanged.
+This is consumed-helper cleanup, not a general unused-import optimization.
+
 A retained helper call must also survive the later `UnPrototypeClass` pass.
 An unknown interleaved call receiving the constructor blocks prototype-method
 folding for hoisted functions as well as variable-initialized functions. This

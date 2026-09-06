@@ -73,12 +73,24 @@ impl VisitMut for UnEs6Class {
         let helper_context = self.module_helper_context.take().unwrap_or_else(|| {
             Es6ClassHelperContext::from_module_items(items, self.unresolved_mark)
         });
+        let used_imports = used_ts_extends_imports(items, &helper_context.ts_extends_helpers);
         let mut inner =
             UnEs6ClassInner::new(helper_context, self.unresolved_mark, self.rewrite_level);
         if inner.can_index_ts_inheritance() && !has_inheritance_dynamic_scope(items) {
             inner.inheritance_uses = Some(Rc::new(BindingUseIndex::collect_module_items(items)));
         }
         items.visit_mut_with(&mut inner);
+        if !used_imports.is_empty() {
+            let remaining = BindingUseIndex::collect_module_items(items).referenced_bindings();
+            for item in items {
+                if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
+                    import.specifiers.retain(|specifier| {
+                        let key = super::helper_matcher::import_specifier_binding_key(specifier);
+                        !used_imports.contains(&key) || remaining.contains(&key)
+                    });
+                }
+            }
+        }
     }
 
     fn visit_mut_stmts(&mut self, stmts: &mut Vec<Stmt>) {
@@ -91,6 +103,36 @@ impl VisitMut for UnEs6Class {
         }
         stmts.visit_mut_with(&mut inner);
     }
+}
+
+// Only drop named tslib helpers that this pass actually made unused. Keep
+// originally-unused source imports and retain module evaluation when the last
+// specifier disappears. Dynamic lookup can still observe an apparent dead use.
+fn used_ts_extends_imports(
+    items: &[ModuleItem],
+    helpers: &HashSet<BindingKey>,
+) -> HashSet<BindingKey> {
+    let mut candidates = HashSet::new();
+    for item in items {
+        if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
+            if !import.type_only && is_tslib_path(import.src.value.as_str().unwrap_or("")) {
+                for specifier in &import.specifiers {
+                    if let ImportSpecifier::Named(named) = specifier {
+                        let key = binding_key(&named.local);
+                        if !named.is_type_only && helpers.contains(&key) {
+                            candidates.insert(key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if candidates.is_empty() || has_inheritance_dynamic_scope(items) {
+        return HashSet::new();
+    }
+    let uses = BindingUseIndex::collect_module_items(items);
+    candidates.retain(|key| uses.use_count(key) > 0);
+    candidates
 }
 
 #[derive(Clone)]

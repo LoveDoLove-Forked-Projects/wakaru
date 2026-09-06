@@ -281,7 +281,7 @@ var Admin = (function (_super) {
 }(User));
 "#;
     let expected = r#"
-import { __extends } from "tslib";
+import "tslib";
 class Admin extends User {
     constructor(name, role) {
         super(name);
@@ -2379,7 +2379,7 @@ Child.value = function (arg) { return base.value.call(this, arg); };
 Child.prototype.lazy = function () { return () => base.prototype.value.call(this); };
 "#,
     );
-    let expected = r#"import { __extends } from "tslib";
+    let expected = r#"import "tslib";
 class Child extends Parent {
     value(arg) { return super.value(arg); }
     static value(arg) { return super.value(arg); }
@@ -2466,7 +2466,11 @@ fn ts_default_inheritance_preserves_unconsumed_and_dynamic_superclass_uses() {
         "Child.value = function () { return base.prototype.value.call(this); };",
     ] {
         let input = ts_default_inheritance(method);
-        assert!(!apply(&input).contains("class Child extends"), "{}", apply(&input));
+        assert!(
+            !apply(&input).contains("class Child extends"),
+            "{}",
+            apply(&input)
+        );
     }
 }
 
@@ -2475,7 +2479,7 @@ fn ts_default_inheritance_does_not_rewrite_a_shadowed_superclass_name() {
     let input = ts_default_inheritance(
         "Child.prototype.value = function (base) { return base.prototype.value.call(this); };",
     );
-    let expected = r#"import { __extends } from "tslib";
+    let expected = r#"import "tslib";
 class Child extends Parent { value(base) { return base.prototype.value.call(this); } }"#;
     assert_eq_normalized(&apply(&input), expected);
 }
@@ -2509,4 +2513,62 @@ fn tsc_default_inheritance_recovers_across_helper_delivery_and_minification() {
         assert!(!minimal.contains("class Child"), "{minimal}");
         assert!(minimal.contains(".apply(this, arguments)"), "{minimal}");
     }
+}
+
+#[test]
+fn consumed_extends_import_keeps_module_evaluation_and_other_imports() {
+    let input = ts_default_inheritance("").replace(
+        "import { __extends }",
+        "import { __extends, __read, custom }",
+    ) + "\nconsume(__read, custom);";
+    let output = apply(&input);
+    assert!(!output.contains("__extends"), "{output}");
+    assert!(output.contains("__read"), "{output}");
+    assert!(output.contains("custom"), "{output}");
+    assert_eq_normalized(
+        &apply(&ts_default_inheritance("")),
+        "import \"tslib\"; class Child extends Parent {}",
+    );
+}
+
+#[test]
+fn extends_import_cleanup_tracks_aliases_and_nested_class_recovery() {
+    let source = ts_default_inheritance("")
+        .replace("__extends", "extend")
+        .replace("import { extend }", "import { __extends as extend }");
+    let output = apply(&source);
+    assert_eq_normalized(&output, "import \"tslib\"; class Child extends Parent {}");
+    let nested = ts_default_inheritance("").replace("var Child", "function make() { var Child")
+        + " return Child; }";
+    let output = apply(&nested);
+    assert!(!output.contains("__extends"), "{output}");
+    assert!(output.contains("import \"tslib\";"), "{output}");
+}
+
+#[test]
+fn extends_import_cleanup_preserves_remaining_or_originally_unused_bindings() {
+    for tail in [
+        "consume(__extends);",
+        "export { __extends };",
+        "function later() { return __extends; }",
+    ] {
+        let input = ts_default_inheritance("") + tail;
+        assert!(apply(&input).contains("import { __extends }"));
+    }
+    let input = "import { __extends } from 'tslib'; var Box = (function() { function Box() {} return Box; })();";
+    assert!(apply(input).contains("import { __extends }"));
+    let input = ts_default_inheritance("")
+        .replace("'tslib'", "'custom'")
+        .replace("\"tslib\"", "\"custom\"");
+    assert!(apply(&input).contains("import { __extends }"));
+}
+
+#[test]
+fn extends_import_cleanup_respects_dynamic_lookup_and_binding_identity() {
+    let input = ts_default_inheritance("") + "function inspect() { return eval(' __extends '); }";
+    assert!(apply(&input).contains("import { __extends }"));
+    let input = ts_default_inheritance("") + "function inspect(__extends) { return __extends; }";
+    let output = apply(&input);
+    assert!(output.contains("import \"tslib\";"), "{output}");
+    assert!(output.contains("return __extends;"), "{output}");
 }
