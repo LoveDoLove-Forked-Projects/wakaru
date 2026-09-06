@@ -957,3 +957,26 @@ fn arrow_decl_non_helper_is_none() {
         assert_eq!(detect_helper_from_arrow(&arrow, false), None);
     });
 }
+
+#[test]
+fn swc_async_namespace_identity_is_separate_from_the_callable_export() {
+    GLOBALS.set(&Globals::new(), || {
+        for declaration in [
+            r#"var helper = require("@swc/helpers/_/_async_to_generator");"#,
+            r#"import * as helper from "@swc/helpers/_/_async_to_generator";"#,
+        ] {
+            let module = parse_module(declaration);
+            let context = LocalHelperContext::collect(&module);
+            let direct = parse_first_call("var result = helper(fn);");
+            let member = parse_first_call("var result = helper._(fn);");
+            assert_eq!(
+                context.helper_callee_kind(direct.callee.as_expr().unwrap()),
+                None
+            );
+            assert_eq!(
+                context.helper_callee_kind(member.callee.as_expr().unwrap()),
+                Some(TranspilerHelperKind::AsyncToGenerator)
+            );
+        }
+    });
+}

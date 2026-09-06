@@ -4093,3 +4093,42 @@ fn stable_default_duplicate_named_writes_keep_property_effects() {
         "{output}"
     );
 }
+
+#[test]
+fn swc_async_runtime_require_preserves_its_namespace_export() {
+    let input = r#"var helper = require("@swc/helpers/_/_async_to_generator"); consume(helper._(unknown));"#;
+    assert_eq_normalized(
+        &apply_unesm(input),
+        r#"import * as helper from "@swc/helpers/_/_async_to_generator"; consume(helper._(unknown));"#,
+    );
+}
+
+#[test]
+fn swc_async_runtime_unsafe_namespace_uses_keep_the_commonjs_boundary() {
+    for effect in [
+        "helper = custom;",
+        "helper._ = custom;",
+        "delete helper._;",
+        "Object.defineProperty(helper, '_', { value: custom });",
+        "consume(helper);",
+        "with (scope) { observe(); }",
+        "eval(code);",
+        "helper(unknown);",
+    ] {
+        let input = format!(
+            r#"var helper = require("@swc/helpers/_/_async_to_generator"); {effect} exports.load = function() {{ return helper._(unknown); }};"#
+        );
+        assert_eq_normalized(&apply_unesm(&input), &input);
+    }
+}
+
+#[test]
+fn swc_async_runtime_namespace_conversion_requires_exact_unresolved_require() {
+    for input in [
+        r#"function require(path) { return custom; } var helper = require("@swc/helpers/_/_async_to_generator"); consume(helper._);"#,
+        r#"var helper = require("@swc/helpers/_/_async_to_generator/extra"); consume(helper._);"#,
+        r#"var helper = require("@swc/helpers/_/_async_to_generator", extra); consume(helper._);"#,
+    ] {
+        assert!(!apply_unesm(input).contains("import * as helper"));
+    }
+}

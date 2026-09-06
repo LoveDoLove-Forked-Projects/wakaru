@@ -7,10 +7,10 @@ use swc_core::ecma::ast::{
     BlockStmt, CallExpr, Callee, CondExpr, Decl, ExportAll, ExportDecl, ExportDefaultExpr,
     ExportNamedSpecifier, ExportSpecifier, Expr, ExprStmt, ForHead, ForInStmt, Function,
     FunctionBody, Id, Ident, IdentName, IfStmt, ImportDecl, ImportDefaultSpecifier,
-    ImportNamedSpecifier, ImportSpecifier, Lit, MemberExpr, MemberProp, Module, ModuleDecl,
-    ModuleExportName, ModuleItem, NamedExport, ObjectPatProp, OptCall, OptChainBase, Pat, Prop,
-    PropName, PropOrSpread, ReturnStmt, SeqExpr, SimpleAssignTarget, Stmt, Str, TaggedTpl,
-    ThisExpr, UnaryOp, VarDecl, VarDeclKind, VarDeclarator,
+    ImportNamedSpecifier, ImportSpecifier, ImportStarAsSpecifier, Lit, MemberExpr, MemberProp,
+    Module, ModuleDecl, ModuleExportName, ModuleItem, NamedExport, ObjectPatProp, OptCall,
+    OptChainBase, Pat, Prop, PropName, PropOrSpread, ReturnStmt, SeqExpr, SimpleAssignTarget, Stmt,
+    Str, TaggedTpl, ThisExpr, UnaryOp, VarDecl, VarDeclKind, VarDeclarator,
 };
 use swc_core::ecma::utils::{find_pat_ids, ExprFactory};
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
@@ -186,6 +186,9 @@ impl VisitMut for UnEsm {
         } else {
             None
         };
+        if !prepare_swc_async_namespace_requires(module, self.unresolved_mark) {
+            return;
+        }
         recover_coupled_commonjs_default_binding(module, self.unresolved_mark);
         // Phase -1: hoist require() calls out of complex expressions
         hoist_embedded_requires(module, self.unresolved_mark);
@@ -2134,6 +2137,54 @@ fn rewrite_commonjs_export_star_loops(module: &mut Module, unresolved_mark: Mark
     }
 
     module.body = rewritten;
+}
+
+/// SWC's modern async runtime exports `_`, not a default function. Preserve
+/// this namespace identity across helper-context rebuilds after UnEsm. Only
+/// read-only `_` uses can become an ESM namespace: mutation, escape or dynamic
+/// lookup must retain the CommonJS module boundary and its mutable object.
+fn prepare_swc_async_namespace_requires(module: &mut Module, unresolved_mark: Mark) -> bool {
+    let candidates: Vec<_> = module
+        .body
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let (local, source, _) = extract_single_require_binding(item, unresolved_mark)?;
+            (source == "@swc/helpers/_/_async_to_generator").then_some((index, local, source))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return true;
+    }
+    let uses = BindingUseIndex::collect(module);
+    let mut eval = DirectEvalPresence::default();
+    module.visit_with(&mut eval);
+    if eval.found
+        || super::un_async_await::module_has_with_stmt(module)
+        || candidates
+            .iter()
+            .any(|(_, local, _)| !uses.has_only_static_member_reads(&local.to_id(), "_"))
+    {
+        return false;
+    }
+    for (index, local, source) in candidates {
+        module.body[index] = ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
+            span: DUMMY_SP,
+            specifiers: vec![ImportSpecifier::Namespace(ImportStarAsSpecifier {
+                span: DUMMY_SP,
+                local,
+            })],
+            src: Box::new(Str {
+                span: DUMMY_SP,
+                value: source.into(),
+                raw: None,
+            }),
+            type_only: false,
+            with: None,
+            phase: Default::default(),
+        }));
+    }
+    true
 }
 
 fn extract_single_require_binding(

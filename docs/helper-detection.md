@@ -168,6 +168,22 @@ including cross-module namespace facts. It removes only a one-argument,
 non-spread call to a proven helper (or an unresolved canonical name), and
 preserves dynamic lookup and reassigned helper bindings.
 
+`UnRegenerator` also consumes modern SWC async runtime namespace facts. A
+`require("@swc/helpers/_/_async_to_generator")` binding is a module object;
+its `_` member is the helper function. The shared context keeps those identities
+separate and also recognizes explicit namespace imports. Recovery requires
+only static `_` reads: replacement, property mutation/deletion, namespace escape,
+`with`, or direct `eval` retain the calls. Cleanup removes a helper only after
+all references have disappeared, including unsupported calls left behind.
+
+At `standard` and above, `UnEsm` preserves a proven read-only SWC async runtime
+require as a namespace import. This keeps its identity through later helper-context
+rebuilds and preserves the runtime's named-only export when a call cannot be
+recovered. Unsafe namespace uses keep the CommonJS module boundary instead of
+inventing an ESM default export or turning a mutable object into an immutable
+namespace. This preparation runs after the existing self-require guard and
+before ordinary require conversion; it does not broaden helper-package matching.
+
 Helper utilities include `LocalHelperContext::helpers_of_kind()` (filter by kind), `remove_helper_declarations()` (delete the helper function), `helpers_with_remaining_refs()` (check if a helper binding is still referenced elsewhere), and TS cleanup helpers such as `remove_unused_inline_ts_helpers()` / `remove_unused_ts_helper_bindings()`.
 
 `collect_module_facts()` records two helper export channels:

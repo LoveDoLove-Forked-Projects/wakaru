@@ -2063,7 +2063,7 @@ fn is_awaiter_arguments_arg(expr: &Expr, helpers: &AsyncHelperContext) -> bool {
 /// Whether the module contains a `with` statement anywhere. Compilers never
 /// emit one, so a module-wide check is a cheap stand-in for a with-scope
 /// model: the identifier-shaped frame slots simply stop being canonical.
-fn module_has_with_stmt(module: &Module) -> bool {
+pub(super) fn module_has_with_stmt(module: &Module) -> bool {
     struct Finder(bool);
     impl Visit for Finder {
         fn visit_with_stmt(&mut self, _: &swc_core::ecma::ast::WithStmt) {

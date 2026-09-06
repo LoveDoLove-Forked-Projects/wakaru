@@ -30,11 +30,14 @@ to cover awaiters wrapping native generators. Private fields target ES2015,
 since TypeScript does not support lowering them to ES5. Interop snippets only
 run in CommonJS profiles: an ESM-to-ESM pass would not produce an interop helper.
 
-The async snippet also runs through the shared SWC ES2015 inline-helper
-producer, then TypeScript 5.9.3 ES5 CommonJS with `importHelpers: true`.
-This leaves an SWC async wrapper around a tslib namespace generator and tests
-`UnRegenerator`'s use of the shared decoder context. The checked-in rule fixture
-pins SWC 1.16.2 and TypeScript 5.9.3; the matrix uses the shared SWC tool cache.
+The async snippet also runs through the shared SWC ES2015 producer with both
+inline and external helpers, then TypeScript 5.9.3 ES5 CommonJS with
+`importHelpers: true`. This leaves an SWC async wrapper around a tslib namespace
+generator and tests both the async helper identity and the shared decoder context.
+A standalone SWC ES2015 external-helper profile provides the named ESM-import
+control. All three profiles run raw and with both Terser variants. The checked-in
+rule fixtures pin SWC 1.16.2 and TypeScript 5.9.3; the matrix uses the shared SWC
+tool cache.
 
 ## Comparison and known gaps
 
@@ -76,7 +79,7 @@ runtime compatibility. The script-only execution harness cannot run these
 modules; no `execute` check is claimed. The matrix does not install or execute
 tslib itself. Runtime behavior tests remain separate from this recovery score.
 
-The current baseline has **117 yes / 15 no / 0 errors across 132 distinct
+The current baseline has **123 yes / 15 no / 0 errors across 138 distinct
 shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
 
 - Compressed array-destructuring cases retain iterator helpers.
@@ -84,7 +87,8 @@ shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
   superclass parameter; full superclass recovery remains incomplete.
 
 The original tslib awaiter regression passes all 18 ES5/ES2015 profiles.
-The mixed producer adds three passing async shapes (raw and both Terser variants).
+The mixed producers add six passing async shapes; the standalone SWC external
+profile adds three more (each runs raw and with both Terser variants).
 Tagged templates and generator delegation now pass across inline, namespace,
 and named-import profiles. Private fields pass all 27 class/export/delivery/minifier
 shapes; both interop snippets pass every applicable CommonJS shape.
@@ -100,8 +104,8 @@ These cases belong in focused rule tests or separate compiler reproductions:
   This TypeScript configuration emits CommonJS namespaces or named ESM imports,
   not those exact spellings; relabeling an edited output as tsc output would hide
   its provenance.
-- Mixed Babel wrappers and SWC external-helper namespace wrappers. The new
-  mixed profile covers SWC inline async helpers around tslib generators.
+- Mixed Babel wrappers and SWC helper kinds other than the async wrapper. The
+  mixed profiles cover SWC inline and external async helpers around tslib generators.
 - Shadowed bindings, `with`, wrong helper sources, unsupported state-machine
   shapes, and rollback behavior: these are rule safety boundaries.
 - Bundled tslib provider facts and webpack entry extraction: these need the

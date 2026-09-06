@@ -3066,3 +3066,103 @@ fn mixed_generator_namespace_requires_unchanged_binding() {
         assert!(!output.contains("async function load"), "{output}");
     }
 }
+
+#[test]
+fn swc_namespace_async_helpers_recover_without_calling_the_namespace() {
+    for declaration in [
+        "var helper = require(\"@swc/helpers/_/_async_to_generator\");",
+        "const helper = require(\"@swc/helpers/_/_async_to_generator\");",
+        "import * as helper from \"@swc/helpers/_/_async_to_generator\";",
+    ] {
+        let input = format!("{declaration} function load(value) {{ return helper._(function*() {{ return yield value; }})(); }}");
+        assert_eq_normalized(
+            &apply(&input),
+            "async function load(value) { return await value; }",
+        );
+        let invalid = format!("{declaration} function load(value) {{ return helper(function*() {{ return yield value; }})(); }}");
+        let output = apply(&invalid);
+        assert!(!output.contains("async function load"), "{output}");
+        assert!(output.contains("helper(function*"), "{output}");
+    }
+}
+
+#[test]
+fn swc_namespace_async_recovery_preserves_unproven_or_mutated_callees() {
+    for prefix in [
+        "var helper = require(\"other-package\");",
+        "var helper = require(\"@swc/helpers/_/_extends\");",
+        "var helper = require(\"@swc/helpers/_/_async_to_generator\"); helper = custom;",
+        "var helper = require(\"@swc/helpers/_/_async_to_generator\"); function replace() { helper = custom; }",
+        "var helper = require(\"@swc/helpers/_/_async_to_generator\"); helper._ = custom;",
+        "var helper = require(\"@swc/helpers/_/_async_to_generator\"); delete helper._;",
+        "var helper = require(\"@swc/helpers/_/_async_to_generator\"); Object.defineProperty(helper, \"_\", { value: custom });",
+        "var helper = require(\"@swc/helpers/_/_async_to_generator\"); with (scope) { observe(); }",
+        "var helper = require(\"@swc/helpers/_/_async_to_generator\"); eval(code);",
+        "function require(path) { return custom; } var helper = require(\"@swc/helpers/_/_async_to_generator\");",
+    ] {
+        let input = format!("{prefix} function load(value) {{ return helper._(function*() {{ return yield value; }})(); }}");
+        let output = apply(&input);
+        assert!(!output.contains("async function load"), "{output}");
+        assert!(output.contains("helper._(function*"), "{output}");
+    }
+}
+
+#[test]
+fn swc_namespace_async_recovery_respects_shadowing_and_remaining_calls() {
+    let prefix = "var helper = require(\"@swc/helpers/_/_async_to_generator\");";
+    let input = format!("{prefix} function load(helper, value) {{ return helper._(function*() {{ return yield value; }})(); }}");
+    assert!(!apply(&input).contains("async function load"));
+    let input = format!("{prefix} function other(helper) {{ helper._ = custom; }} function load(value) {{ return helper._(function*() {{ return yield value; }})(); }}");
+    assert!(apply(&input).contains("async function load"));
+    let input = format!("{prefix} function load(value) {{ return helper._(function*() {{ return yield value; }})(); }} consume(helper._(unknown));");
+    let output = apply(&input);
+    assert!(output.contains("async function load"), "{output}");
+    assert!(output.contains("helper._(unknown)"), "{output}");
+    assert!(
+        output.contains("require(\"@swc/helpers/_/_async_to_generator\")"),
+        "{output}"
+    );
+}
+
+#[test]
+fn swc_external_then_typescript_namespace_generator_restores_async() {
+    for input in [
+        include_str!("fixtures/mixed-async/external-generated.js"),
+        include_str!("fixtures/mixed-async/external-es2015.js"),
+    ] {
+        let output = render(input);
+        assert!(output.contains("async function load"), "{output}");
+        assert!(output.contains("await Promise.resolve(value)"), "{output}");
+        assert!(!output.contains("_async_to_generator"), "{output}");
+        assert!(!output.contains("__generator"), "{output}");
+    }
+}
+
+#[test]
+fn swc_async_namespace_pipeline_retains_mutations_and_unsupported_calls() {
+    let prefix = r#"var helper = require("@swc/helpers/_/_async_to_generator");"#;
+    for effect in [
+        "helper = custom;",
+        "helper._ = custom;",
+        "delete helper._;",
+        "eval(code);",
+    ] {
+        let input = format!("{prefix} {effect} exports.load = function(value) {{ return helper._(function*() {{ return yield value; }})(); }};");
+        let output = render(&input);
+        assert!(!output.contains("async function"), "{output}");
+        assert!(
+            output.contains("require(\"@swc/helpers/_/_async_to_generator\")"),
+            "{output}"
+        );
+        assert!(output.contains("helper._(function*"), "{output}");
+    }
+    let input = format!("{prefix} function load(value) {{ return helper._(function*() {{ return yield value; }})(); }} consume(helper._(unknown));");
+    let output = render(&input);
+    assert!(output.contains("async function load"), "{output}");
+    assert!(output.contains("import * as helper"), "{output}");
+    assert!(output.contains("helper._(unknown)"), "{output}");
+    let input = format!("{prefix} exports.load = function(value) {{ return helper(function*() {{ return yield value; }})(); }};");
+    let output = render(&input);
+    assert!(!output.contains("async function"), "{output}");
+    assert!(output.contains("helper(function*"), "{output}");
+}

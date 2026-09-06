@@ -23,7 +23,9 @@ use super::state_machine::{
     OpcodeReturnScan, StateMachineProgram,
 };
 use super::transpiler_helper_utils::{BindingKey, LocalHelperContext, TranspilerHelperKind};
-use super::un_async_await::{try_transform_ts_generator_body, AsyncHelperContext};
+use super::un_async_await::{
+    module_has_with_stmt, try_transform_ts_generator_body, AsyncHelperContext,
+};
 
 use crate::js_names::is_likely_generated_alias;
 use crate::utils::paren::strip_parens;
@@ -97,6 +99,20 @@ fn run_un_regenerator(
         .filter(|(_, kind)| **kind == TranspilerHelperKind::AsyncToGenerator)
         .map(|((sym, ctxt), _)| (sym.clone(), *ctxt))
         .collect();
+    let mut swc_members: Vec<_> = local_helpers
+        .swc_member_helpers_of_kind(TranspilerHelperKind::AsyncToGenerator)
+        .into_keys()
+        .collect();
+    if !swc_members.is_empty() {
+        let mut eval = super::eval_utils::DirectEvalPresence::default();
+        module.visit_with(&mut eval);
+        if eval.found || module_has_with_stmt(module) {
+            swc_members.clear();
+        } else {
+            let uses = crate::analysis::binding_uses::BindingUseIndex::collect(module);
+            swc_members.retain(|key| uses.has_only_static_member_reads(key, "_"));
+        }
+    }
     let mut async_to_gen_default_members = Vec::new();
     if let Some(module_facts) = module_facts {
         let imported_helpers = collect_cross_module_async_helpers(
@@ -111,6 +127,7 @@ fn run_un_regenerator(
     let async_to_gen_callees = AsyncToGenCallees {
         direct: &async_to_gen_bindings,
         default_members: &async_to_gen_default_members,
+        swc_members: &swc_members,
     };
     let mut generator_helpers =
         AsyncHelperContext::from_local_helpers(local_helpers, Some(unresolved_mark));
@@ -159,8 +176,8 @@ fn run_un_regenerator(
     remove_consumed_mark_declarations(module, &consumed_marks);
 
     // Phase 4: Remove _asyncToGenerator helper if no longer referenced
-    if !async_to_gen_bindings.is_empty() {
-        let roots: HashMap<BindingKey, TranspilerHelperKind> = helpers
+    if !async_to_gen_bindings.is_empty() || !swc_members.is_empty() {
+        let mut roots: HashMap<BindingKey, TranspilerHelperKind> = helpers
             .iter()
             .filter(|(key, kind)| {
                 **kind == TranspilerHelperKind::AsyncToGenerator
@@ -168,6 +185,11 @@ fn run_un_regenerator(
             })
             .map(|(key, kind)| (key.clone(), *kind))
             .collect();
+        roots.extend(
+            swc_members
+                .into_iter()
+                .map(|key| (key, TranspilerHelperKind::AsyncToGenerator)),
+        );
         local_helpers.remove_helpers_with_dependencies(module, roots);
     }
     if !regenerator_runtime_helpers.is_empty() {
@@ -181,6 +203,7 @@ fn run_un_regenerator(
 struct AsyncToGenCallees<'a> {
     direct: &'a [BindingKey],
     default_members: &'a [BindingKey],
+    swc_members: &'a [BindingKey],
 }
 
 #[derive(Default)]
@@ -4106,16 +4129,17 @@ fn is_async_to_gen_callee(expr: &Expr, async_to_gen_callees: &AsyncToGenCallees)
     let Expr::Member(member) = expr else {
         return false;
     };
-    if !member_prop_name(&member.prop, "default") {
-        return false;
-    }
     let Expr::Ident(obj) = member.obj.as_ref() else {
         return false;
     };
-    async_to_gen_callees
-        .default_members
-        .iter()
-        .any(|(sym, ctxt)| obj.sym == *sym && obj.ctxt == *ctxt)
+    let candidates = if member_prop_name(&member.prop, "_") {
+        async_to_gen_callees.swc_members
+    } else if member_prop_name(&member.prop, "default") {
+        async_to_gen_callees.default_members
+    } else {
+        return false;
+    };
+    candidates.iter().any(|key| binding_key(obj) == *key)
 }
 
 fn extract_async_to_gen_body(

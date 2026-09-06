@@ -158,8 +158,15 @@ impl LocalHelperContext {
         let tslib_namespaces = collect_tslib_namespace_bindings(module, unresolved_mark);
         let (swc_member_helpers, swc_member_helper_namespaces) =
             collect_swc_member_helpers(module, unresolved_mark);
+        let mut helpers = collect_transpiler_helpers_inner(module, unresolved_mark);
+        // A modern SWC runtime require returns a namespace, not its `_` export.
+        // Async consumers use the separate member facts for these bindings.
+        helpers.retain(|key, kind| {
+            *kind != TranspilerHelperKind::AsyncToGenerator
+                || !swc_member_helper_namespaces.contains_key(key)
+        });
         Self {
-            helpers: collect_transpiler_helpers_inner(module, unresolved_mark),
+            helpers,
             swc_member_helpers,
             swc_member_helper_namespaces,
             ts_helpers: collect_ts_helpers(module, &tslib_namespaces, unresolved_mark),
