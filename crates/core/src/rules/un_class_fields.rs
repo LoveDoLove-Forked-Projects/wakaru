@@ -342,8 +342,121 @@ fn collect_single_owner_private_maps(
         .keys()
         .filter(|key| class_counts.get(*key).copied() == Some(1))
         .filter(|key| !outside_finder.refs.contains(*key))
+        .filter(|key| private_map_has_stable_lifetime(module, key, private_maps, unresolved_mark))
         .cloned()
         .collect()
+}
+
+// A backing map must exist before instances can be constructed, and must
+// never be reset. The usual tsc form initializes it immediately after the
+// class; only a class without definition-time executable members is safe there.
+fn private_map_has_stable_lifetime(
+    module: &Module,
+    key: &BindingKey,
+    private_maps: &HashMap<BindingKey, Atom>,
+    unresolved_mark: Mark,
+) -> bool {
+    // Count initialization writes throughout the AST, including comma
+    // expressions and nested functions. The top-level shape check below alone
+    // would miss a later reset hidden inside a sequence.
+    struct InitializerCounter<'a> {
+        key: &'a BindingKey,
+        unresolved_mark: Mark,
+        count: usize,
+    }
+    impl Visit for InitializerCounter<'_> {
+        fn visit_var_declarator(&mut self, decl: &swc_core::ecma::ast::VarDeclarator) {
+            if matches!(&decl.name, Pat::Ident(binding) if binding_key(&binding.id) == *self.key)
+                && decl
+                    .init
+                    .as_deref()
+                    .is_some_and(|expr| is_new_weak_map_expression(expr, self.unresolved_mark))
+            {
+                self.count += 1;
+            }
+            decl.visit_children_with(self);
+        }
+        fn visit_expr(&mut self, expr: &Expr) {
+            if private_weak_map_assignment_key(expr, self.unresolved_mark).as_ref()
+                == Some(self.key)
+            {
+                self.count += 1;
+            }
+            expr.visit_children_with(self);
+        }
+    }
+    let mut counter = InitializerCounter {
+        key,
+        unresolved_mark,
+        count: 0,
+    };
+    module.visit_with(&mut counter);
+    if counter.count != 1 {
+        return false;
+    }
+    let mut initializer = None;
+    let mut owner = None;
+    for (index, item) in module.body.iter().enumerate() {
+        let initializes = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) => {
+                var.decls.len() == 1 && var.decls.iter().any(|decl| {
+                    matches!(&decl.name, Pat::Ident(binding) if binding_key(&binding.id) == *key)
+                        && decl
+                            .init
+                            .as_deref()
+                            .is_some_and(|expr| is_new_weak_map_expression(expr, unresolved_mark))
+                })
+            }
+            ModuleItem::Stmt(Stmt::Expr(expr)) => {
+                private_weak_map_assignment_key(&expr.expr, unresolved_mark).as_ref() == Some(key)
+            }
+            _ => false,
+        };
+        if initializes && initializer.replace(index).is_some() {
+            return false;
+        }
+        let class = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(decl))) => Some(&*decl.class),
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export)) => {
+                match &export.decl {
+                    Decl::Class(decl) => Some(&*decl.class),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(class) = class {
+            let mut refs = PrivateMapRefCollector {
+                private_maps,
+                refs: HashSet::new(),
+            };
+            class.body.visit_with(&mut refs);
+            if refs.refs.contains(key) {
+                owner = Some((index, class));
+            }
+        }
+    }
+    let (Some(initializer), Some((owner, class))) = (initializer, owner) else {
+        return false;
+    };
+    if initializer < owner {
+        return true;
+    }
+    // Local export lists have no evaluation step. UnEsm inserts one between
+    // the class declaration and tsc's backing-map initialization.
+    module.body[owner + 1..initializer].iter().all(|item| {
+        matches!(item, ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportNamed(export)) if export.src.is_none())
+            || matches!(item, ModuleItem::Stmt(Stmt::Empty(_)))
+    })
+        && class.decorators.is_empty()
+        && class.body.iter().all(|member| match member {
+            ClassMember::Constructor(_) | ClassMember::Empty(_) => true,
+            ClassMember::Method(method) => {
+                !matches!(method.key, PropName::Computed(_))
+                    && method.function.decorators.is_empty()
+            }
+            _ => false,
+        })
 }
 
 struct PrivateMapClassConsumerCounter<'a> {

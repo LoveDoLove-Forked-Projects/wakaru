@@ -273,6 +273,16 @@ so it consumes exactly the helper's requested number of iterator values.
 Conditional/deferred access, `arguments`, direct `eval`, `with`, and minimal
 rewrite mode all preserve the lowered form.
 
+### Private-field backing-map lifetime
+
+`UnClassFields` promotes a backing WeakMap only when one class owns it and
+its initialization has a stable lifetime. It must have exactly one allocation:
+either before the class, or immediately after a class without definition-time
+executable members. Local export lists and empty statements may intervene;
+executable statements may not. Earlier construction, later resets (including
+comma expressions), escaping maps, and unsupported map uses keep the lowered
+form. These are proof requirements, not rewrite assumptions.
+
 ### Tagged template body shapes
 
 `taggedTemplateLiteral` detection uses signal-based matching on a 2-param

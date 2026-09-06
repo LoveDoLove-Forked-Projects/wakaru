@@ -625,3 +625,45 @@ class Foo extends Base {
 "#;
     assert_eq_normalized(&render(input), input.trim());
 }
+
+#[test]
+fn private_backing_map_lifetime_is_preserved() {
+    for (members, suffix) in [
+        ("", "new Foo(); _Foo_x = new WeakMap();"),
+        (
+            "",
+            "_Foo_x = new WeakMap(); var first = new Foo(); _Foo_x = new WeakMap();",
+        ),
+        ("static first = new Foo();", "_Foo_x = new WeakMap();"),
+        ("", "var first = new Foo(), _Foo_x = new WeakMap();"),
+        (
+            "",
+            "_Foo_x = new WeakMap(); use(new Foo()), _Foo_x = new WeakMap();",
+        ),
+    ] {
+        let input = format!(
+            "var _Foo_x; class Foo {{ constructor() {{ _Foo_x.set(this, 1); }} {members} }} {suffix}"
+        );
+        let output = common::render_rule(&input, |mark| {
+            wakaru_core::rules::UnClassFields::new_with_mark(
+                mark,
+                wakaru_core::rules::RewriteLevel::Standard,
+            )
+        });
+        assert!(!output.contains("#x"), "{output}");
+        assert!(output.contains("_Foo_x.set(this, 1)"), "{output}");
+    }
+}
+
+#[test]
+fn private_backing_map_allows_local_export_between_class_and_initializer() {
+    let input = "var _Foo_x; class Foo { constructor() { _Foo_x.set(this, 1); } } export { Foo }; _Foo_x = new WeakMap();";
+    let output = common::render_rule(input, |mark| {
+        wakaru_core::rules::UnClassFields::new_with_mark(
+            mark,
+            wakaru_core::rules::RewriteLevel::Standard,
+        )
+    });
+    assert!(output.contains("#x = 1"), "{output}");
+    assert!(!output.contains("WeakMap"), "{output}");
+}
