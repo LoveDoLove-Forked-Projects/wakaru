@@ -4352,3 +4352,84 @@ fn export_name_is(name: &swc_core::ecma::ast::ModuleExportName, expected: &str) 
 fn str_to_atom(value: &swc_core::atoms::Wtf8Atom) -> Atom {
     Atom::from(value.as_str().unwrap_or(""))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use swc_core::common::{sync::Lrc, FileName, Globals, SourceMap, GLOBALS};
+    use swc_core::ecma::parser::{lexer::Lexer, EsSyntax, Parser, StringInput, Syntax};
+    use swc_core::ecma::transforms::base::resolver;
+
+    #[test]
+    fn ts_decoder_handoff_resolves_canonical_values_and_preserves_shadowing() {
+        // Test the generator decoder before async yield-to-await conversion.
+        // Opcode 5 means yield*, not an await; wrapping this synthetic shape
+        // in an async helper would not model compiler-lowered async source.
+        for name in ["__values", "_ts_values"] {
+            for shadowed in [false, true] {
+                GLOBALS.set(&Globals::new(), || {
+                    let parameter = if shadowed { name } else { "items" };
+                    let source = format!(
+                        r#"
+import {{ __generator as generator }} from "tslib";
+function inner({parameter}) {{
+    return generator(this, function(state) {{
+        switch (state.label) {{
+            case 0: return [5, {name}(items)];
+            case 1: state.sent(); return [2];
+        }}
+    }});
+}}
+"#
+                    );
+                    let cm: Lrc<SourceMap> = Default::default();
+                    let file = cm.new_source_file(Lrc::new(FileName::Anon), source);
+                    let lexer = Lexer::new(
+                        Syntax::Es(EsSyntax::default()),
+                        Default::default(),
+                        StringInput::from(&*file),
+                        None,
+                    );
+                    let mut module = Parser::new_from(lexer).parse_module().unwrap();
+                    let unresolved_mark = Mark::new();
+                    module.visit_mut_with(&mut resolver(unresolved_mark, Mark::new(), false));
+                    let local_helpers =
+                        LocalHelperContext::collect_with_mark(&module, unresolved_mark);
+                    let mut helpers = AsyncHelperContext::from_local_helpers(
+                        &local_helpers,
+                        Some(unresolved_mark),
+                    );
+                    helpers.record_module_hazards(&module);
+                    let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(inner))) = &module.body[1] else {
+                        panic!("expected inner function");
+                    };
+                    let (_, statements, _) = extract_async_to_gen_body_with_params(
+                        Expr::Fn(FnExpr {
+                            ident: None,
+                            function: inner.function.clone(),
+                        }),
+                        &helpers,
+                    )
+                    .expect("shared TS decoder should recover the generator body");
+                    let Stmt::Expr(statement) = &statements[0] else {
+                        panic!("expected delegated yield");
+                    };
+                    let Expr::Yield(yielded) = statement.expr.as_ref() else {
+                        panic!("expected yield expression");
+                    };
+                    assert!(yielded.delegate);
+                    let arg = yielded.arg.as_deref().unwrap();
+                    if shadowed {
+                        let Expr::Call(call) = arg else {
+                            panic!("a shadowed values function must still be called");
+                        };
+                        assert!(matches!(call.callee.as_expr().map(|e| e.as_ref()),
+                            Some(Expr::Ident(id)) if id.sym == name));
+                    } else {
+                        assert!(matches!(arg, Expr::Ident(id) if id.sym == "items"));
+                    }
+                });
+            }
+        }
+    }
+}
