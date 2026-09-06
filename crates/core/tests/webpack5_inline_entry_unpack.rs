@@ -1434,9 +1434,9 @@ fn trailing_iife_unwraps_after_unused_empty_anchor_regardless_of_name() {
 }
 
 #[test]
-fn trailing_iife_preserves_referenced_ordinary_empty_anchor() {
+fn trailing_iife_preserves_anchor_used_as_an_application_object() {
     use wakaru_core::driver::test_support::unpack_raw;
-    for name in ["app", "r"] {
+    for name in ["app", "r", "__webpack_exports__"] {
         let source = bundle_with_startup(&format!(
             "var {name} = {{}}; (() => {{ {name}.value = requireModule(1); consume({name}); }})();"
         ));
@@ -1461,5 +1461,41 @@ fn trailing_async_iife_keeps_boundary_after_unused_mangled_anchor() {
     let normal = expect_unpack(&source, "bundle.js");
     for entry in [entry_of(&raw.modules), entry_of(&normal)] {
         assert!(entry.contains("async"), "{entry}");
+    }
+}
+
+#[test]
+fn trailing_iife_export_anchor_requires_exclusive_helper_uses() {
+    use wakaru_core::driver::test_support::unpack_raw;
+    for extra in [
+        "",
+        "consume(__webpack_exports__);",
+        "consume(() => __webpack_exports__);",
+    ] {
+        let source = bundle_with_startup(&format!(
+            r#"
+            requireModule.r = (object) => Object.defineProperty(object, "__esModule", {{ value: true }});
+            requireModule.d = (object, defs) => {{ for (var key in defs) Object.defineProperty(object, key, {{ enumerable: true, get: defs[key] }}); }};
+            var __webpack_exports__ = {{}};
+            (() => {{
+                requireModule.r(__webpack_exports__);
+                requireModule.d(__webpack_exports__, {{ value: () => value }});
+                var value = requireModule(1);
+                {extra}
+            }})();
+        "#
+        ));
+        let raw = unpack_raw(&source, &DecompileOptions::default()).unwrap();
+        let normal = expect_unpack(&source, "bundle.js");
+        if extra.is_empty() {
+            assert!(entry_of(&raw.modules).contains("exports"));
+            assert!(entry_of(&normal).contains("export"));
+            assert!(!entry_of(&normal).contains("__webpack_exports__"));
+        } else {
+            for entry in [entry_of(&raw.modules), entry_of(&normal)] {
+                assert!(entry.contains("__webpack_exports__ = {}"), "{entry}");
+                assert!(!entry.contains("consume(exports)"), "{entry}");
+            }
+        }
     }
 }

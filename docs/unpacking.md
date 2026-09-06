@@ -84,8 +84,10 @@ top-level runtime rather than this IIFE shape and is not structurally split.
 ### Webpack 5 trailing startup calls
 
 A trailing IIFE is extracted as webpack's entry wrapper only when it occupies
-the whole startup region, optionally preceded by the standalone canonical
-`__webpack_exports__ = {}` anchor. Entry declarations and side effects before
+the whole startup region, optionally preceded by a standalone unused empty-object
+anchor or a canonical `__webpack_exports__ = {}` anchor used exclusively by
+webpack export helpers. A live anchor passed to application code or captured by
+a closure retains its declaration and wrapper, even with the canonical name. Entry declarations and side effects before
 an authored trailing call remain in `entry.js`, including entry expressions
 merged into the last runtime sequence. Raw extraction uses the same boundary.
 

@@ -1913,14 +1913,27 @@ fn extract_trailing_entry_body(
     // A final IIFE is only the entry wrapper when it owns the entire startup
     // region. Terser can inline an authored main() after imports or other
     // entry statements; extracting only that call body would discard them.
-    let (startup, _) = extract_webpack5_startup_region(bootstrap_body, modules_sym, require_plan)?;
+    let (startup, require_sym) =
+        extract_webpack5_startup_region(bootstrap_body, modules_sym, require_plan)?;
     let entry_stmt = match startup.as_slice() {
         [stmt] => stmt,
         [anchor, stmt]
             if empty_object_anchor(anchor).is_some_and(|(binding, var)| {
                 var.decls.len() == 1
-                    && (binding == "__webpack_exports__"
-                        || !stmts_reference_ident(std::slice::from_ref(stmt), &binding))
+                    && (!stmts_reference_ident(std::slice::from_ref(stmt), &binding)
+                        || (binding == "__webpack_exports__" && {
+                            // Check the body at the scope it will occupy after unwrapping.
+                            // The canonical spelling alone does not prove that the object
+                            // is used exclusively by webpack's export machinery.
+                            let Some(body) = extract_iife_stmt_body(stmt) else {
+                                return false;
+                            };
+                            let mut region = vec![anchor.clone()];
+                            region.extend(body.stmts.iter().cloned());
+                            let evidence =
+                                anchor_export_helper_evidence(&region, &require_sym, &binding);
+                            evidence.helper && !evidence.other_uses
+                        }))
             }) =>
         {
             stmt
