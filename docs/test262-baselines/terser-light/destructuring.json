@@ -91,7 +91,7 @@
       "variant": "case",
       "status": "rejected",
       "kind": "swc-array-binding-elision",
-      "fingerprint": "c61b45ccebcbd008bebad1bb11623b3e57677e685ed5fa97e32e4768219c5c56",
+      "fingerprint": "ad660370c7fbcdf394c515a528d37a56da7695f62f000062002f43fb9f35c9dd",
       "summary": "Error: sloppy: expected success, got runtime TypeError: Iterator result undefined is not an object"
     },
     {
@@ -99,7 +99,7 @@
       "variant": "case",
       "status": "rejected",
       "kind": "swc-array-binding-elision",
-      "fingerprint": "2cd1bcaa6ae79f7df9a9c58edd7f6baf869e723a7f6076395bd8fd68e75b249a",
+      "fingerprint": "792b7ddb5fdecf1d4a54693192bdbee79e0ed7df5b235f81c5281c85d644ba79",
       "summary": "Error: sloppy: expected success, got runtime Test262Error: Expected SameValue(«1», «2») to be true"
     },
     {
@@ -123,7 +123,7 @@
       "variant": "case",
       "status": "rejected",
       "kind": "swc-array-binding-elision",
-      "fingerprint": "75433a5e44936ea7c48d2ad9d2ef1bc1c2827370324a2edf6a40b8cbdc519fce",
+      "fingerprint": "d5d96c1557d09ec3784c25aa48cb8726da6c0f3c1ed68c6aba7c3fd3e5a9f479",
       "summary": "Error: sloppy: expected success, got runtime Test262Error: Expected SameValue(«0», «1») to be true"
     },
     {
@@ -131,7 +131,7 @@
       "variant": "case",
       "status": "rejected",
       "kind": "swc-array-binding-elision",
-      "fingerprint": "af4e6d40ad5b7d791e2542009fe4c4185cd08b527855140c4a347321d83b928c",
+      "fingerprint": "fa4a509d11f4e2f94afc176bf5589ecb103d26a981194edffe5670732bd33a8c",
       "summary": "Error: sloppy: expected success, got runtime Test262Error: Expected SameValue(«0», «1») to be true"
     },
     {
@@ -139,7 +139,7 @@
       "variant": "case",
       "status": "rejected",
       "kind": "swc-array-binding-elision",
-      "fingerprint": "02e86a1c84e311674c40e097908b59f33b8f873f0bf7ec1fb0c05108e94ff262",
+      "fingerprint": "aaedc2ff82ad9821c6c388913ab4dc5e841d183baf6e7a747c68986a460864da",
       "summary": "Error: sloppy: expected success, got runtime Test262Error: Expected SameValue(«0», «2») to be true"
     },
     {
