@@ -283,7 +283,25 @@ rationale, or level gating appear.
   RemoveVoid, UnConditionals, and UnCurlyBraces. Pattern A
   (`if (arg === undefined) arg = val`) runs at all levels; `arguments[i]`
   reconstruction, object-alias defaults, and destructured-alias folding are
-  `standard+`. Pitfall: `stmts_reference_ident` matches by *emitted name*,
+  `standard+`. Pattern A bails when the function or a nested arrow can
+  observe the `arguments` mapping that a simple parameter list keeps
+  (`arguments.length` and literal tail indexes are fine; other uses and direct
+  `eval` are not), so a TypeScript rest-parameter copy loop blocks the first
+  pass and UnParameters2 recovers the default after ArgRest has replaced the
+  loop. Guards convert in ascending parameter order within the first 15
+  statements; a guard that follows other statements converts only when the
+  default is side-effect-free (literals, function values, `this`, identifier
+  reads, structures of those; property reads at `standard+`), no skipped
+  statement or hoisted function declaration mentions the parameter, and every
+  value the default reads is stable across the skipped statements: a parameter
+  it reads must not be written there (directly, by `++`, or by a closure
+  created there), and an outer binding, global, or property read requires the
+  skipped statements to be inert declarations (`var _this = this;`, `let t;`,
+  and at `standard+` object destructuring declarations). A parameter read or
+  written before its guard (ws `ping`, commander `_prepareUserArgs`) keeps the
+  guard, and so does `seed = 1; if (a === void 0) a = seed;`.
+  `Function.length` still drops to the first default's index; that arity
+  change is accepted. Pitfall: `stmts_reference_ident` matches by *emitted name*,
   ignoring SyntaxContext — intentional (prevents invalid parameter lists
   after rewriting) but can make folds bail when an alias was inlined to a
   short parameter name.

@@ -3,9 +3,10 @@ use swc_core::common::{Mark, Spanned, SyntaxContext, DUMMY_SP};
 use swc_core::ecma::ast::{
     ArrayPat, ArrowExpr, ArrowFunctionBody, AssignExpr, AssignOp, AssignPat, AssignPatProp,
     AssignTarget, BinExpr, BinaryOp, BindingIdent, Bool, CatchClause, ClassDecl, ComputedPropName,
-    Decl, Expr, FnDecl, Function, FunctionBody, Ident, IdentName, IfStmt, KeyValuePatProp, Lit,
-    MemberExpr, MemberProp, Number, ObjectPat, ObjectPatProp, Param, Pat, Prop, PropName,
-    SimpleAssignTarget, Stmt, UnaryExpr, UnaryOp, UpdateExpr, VarDecl, VarDeclKind,
+    Constructor, Decl, Expr, FnDecl, Function, FunctionBody, Ident, IdentName, IfStmt,
+    KeyValuePatProp, Lit, MemberExpr, MemberProp, Number, ObjectPat, ObjectPatProp, Param, Pat,
+    Prop, PropName, PropOrSpread, SimpleAssignTarget, Stmt, UnaryExpr, UnaryOp, UpdateExpr,
+    VarDecl, VarDeclKind,
 };
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
@@ -14,6 +15,7 @@ use crate::js_names::{is_likely_generated_alias, is_reserved_binding_name};
 use super::decl_utils::{
     contains_use_strict_string_statement, has_direct_use_strict_directive, same_ident,
 };
+use super::eval_utils::{js_source_mentions_binding, DirectEvalAnalyzer};
 use super::rename_utils::{rename_bindings, BindingRename};
 use super::RewriteLevel;
 use crate::utils::paren::strip_parens;
@@ -90,7 +92,7 @@ fn process_function_params_inner(
 ) {
     let body_bindings = collect_body_bindings(body);
 
-    process_pattern_a_params(params, body, unresolved_mark, &body_bindings);
+    process_pattern_a_params(params, body, level, unresolved_mark, &body_bindings);
     if level >= RewriteLevel::Standard {
         process_pattern_c_params(params, body, unresolved_mark, &body_bindings);
         process_pattern_b_params(params, body, unresolved_mark, &body_bindings);
@@ -145,7 +147,7 @@ fn process_arrow_params_inner(
 ) {
     let body_bindings = collect_body_bindings(body);
 
-    process_pattern_a_arrow_params(params, body, unresolved_mark, &body_bindings);
+    process_pattern_a_arrow_params(params, body, level, unresolved_mark, &body_bindings);
     if level >= RewriteLevel::Standard {
         process_pattern_c_arrow_params(params, body, unresolved_mark, &body_bindings);
         fold_destructured_arrow_param_aliases(params, body, unresolved_mark);
@@ -156,42 +158,89 @@ fn process_arrow_params_inner(
 // Pattern A: `if (a === void 0) { a = 1; }` → default param
 // ============================================================
 
+//
+// A default parameter is evaluated before the first body statement, in
+// parameter order, and a non-simple parameter list unmaps `arguments`. The
+// function must not observe the `arguments` slots that a mapped parameter list
+// keeps in sync. A guard may follow other statements only when hoisting its
+// default past them is unobservable: none of them (and no hoisted function
+// declaration) mentions the parameter, so the guard still sees the call-time
+// value; the default itself is a side-effect-free expression, so running it
+// earlier (or on a path that returned before the guard) changes nothing; and
+// every value the default reads is stable across the skipped statements — a
+// parameter they do not mention, or, for outer bindings, globals, and property
+// reads, skipped statements that are inert declarations and cannot write
+// anything.
+// `Function.length` still drops to the index of the first default; that arity
+// change is accepted at every level.
+
+/// Guards are only looked for near the top of the body.
+const PATTERN_A_SCAN_LIMIT: usize = 15;
+
 fn process_pattern_a_params(
     params: &mut Vec<Param>,
     body: &mut FunctionBody,
+    level: RewriteLevel,
     unresolved_mark: Mark,
     body_bindings: &[BindingId],
 ) {
+    if function_observes_parameter_mapping(body, params.len(), unresolved_mark) {
+        return;
+    }
+
+    let hoisted_fn_mentions = HoistedFnDeclMentions::collect(body);
+    let param_bindings = current_or_later_param_bindings(params, 0);
     let mut to_remove: Vec<usize> = Vec::new();
+    let mut skipped: Vec<usize> = Vec::new();
+    let mut last_param_idx: Option<usize> = None;
 
-    // Only scan first 15 statements
-    let scan_limit = body.stmts.len().min(15);
-
-    for (stmt_idx, stmt) in body.stmts[..scan_limit].iter().enumerate() {
-        let extracted = extract_default_param_from_if(stmt, unresolved_mark);
-
-        if let Some((param_ident, default_val)) = extracted {
-            // Find the matching parameter
-            if let Some(param_idx) = find_plain_param_idx(params, &param_ident) {
+    let scan_limit = body.stmts.len().min(PATTERN_A_SCAN_LIMIT);
+    for stmt_idx in 0..scan_limit {
+        let stmt = &body.stmts[stmt_idx];
+        let candidate = extract_default_param_from_if(stmt, unresolved_mark).and_then(
+            |(param_ident, default_val)| {
+                let param_idx = find_plain_param_idx(params, &param_ident)?;
+                if last_param_idx.is_some_and(|last| param_idx <= last) {
+                    return None;
+                }
                 if default_references_blocked_param_binding(
                     params,
                     param_idx,
                     &default_val,
                     body_bindings,
                 ) {
-                    continue;
+                    return None;
                 }
-                // Replace the param with an assignment pattern
-                let original_pat =
-                    std::mem::replace(&mut params[param_idx].pat, Pat::Invalid(Default::default()));
-                params[param_idx].pat = Pat::Assign(AssignPat {
-                    span: DUMMY_SP,
-                    left: Box::new(original_pat),
-                    right: default_val,
-                });
-                to_remove.push(stmt_idx);
-            }
-        }
+                let binding = (param_ident.sym.clone(), param_ident.ctxt);
+                if !can_hoist_default_past_skipped(
+                    &body.stmts,
+                    &skipped,
+                    &binding,
+                    &param_bindings,
+                    &default_val,
+                    &hoisted_fn_mentions,
+                    level,
+                    unresolved_mark,
+                ) {
+                    return None;
+                }
+                Some((param_idx, default_val))
+            },
+        );
+        let Some((param_idx, default_val)) = candidate else {
+            skipped.push(stmt_idx);
+            continue;
+        };
+        // Replace the param with an assignment pattern
+        let original_pat =
+            std::mem::replace(&mut params[param_idx].pat, Pat::Invalid(Default::default()));
+        params[param_idx].pat = Pat::Assign(AssignPat {
+            span: DUMMY_SP,
+            left: Box::new(original_pat),
+            right: default_val,
+        });
+        to_remove.push(stmt_idx);
+        last_param_idx = Some(param_idx);
     }
 
     // Remove matched if statements (in reverse order to preserve indices)
@@ -200,39 +249,508 @@ fn process_pattern_a_params(
     }
 }
 
+/// A guard preceded by other statements can still become a default when
+/// those statements cannot have changed or observed the parameter, the
+/// default cannot be observed running earlier, and every value the default
+/// reads is the same before and after the skipped statements.
+#[allow(clippy::too_many_arguments)]
+fn can_hoist_default_past_skipped(
+    stmts: &[Stmt],
+    skipped: &[usize],
+    binding: &BindingId,
+    param_bindings: &[BindingId],
+    default_val: &Expr,
+    hoisted_fn_mentions: &HoistedFnDeclMentions,
+    level: RewriteLevel,
+    unresolved_mark: Mark,
+) -> bool {
+    if skipped.is_empty() {
+        return true;
+    }
+    if !is_pure_default_expr(default_val, level, unresolved_mark) {
+        return false;
+    }
+    let mentioned_before_guard = |dependency: &BindingId| {
+        hoisted_fn_mentions.mentions(dependency)
+            || skipped
+                .iter()
+                .any(|&idx| stmt_mentions_binding(&stmts[idx], dependency))
+    };
+    if mentioned_before_guard(binding) {
+        return false;
+    }
+
+    let dependencies = default_dependencies(default_val, unresolved_mark);
+    let mut needs_inert_prefix = dependencies.needs_inert_prefix;
+    for dependency in &dependencies.bindings {
+        if param_bindings.contains(dependency) {
+            // Only this function's own code can write a parameter: a direct
+            // write in a skipped statement, a closure created there, or a
+            // hoisted function declaration. Plain reads leave it unchanged.
+            if hoisted_fn_mentions.mentions(dependency)
+                || skipped
+                    .iter()
+                    .any(|&idx| stmt_may_write_binding(&stmts[idx], dependency))
+            {
+                return false;
+            }
+        } else {
+            // An outer binding can be written by any call the skipped
+            // statements make.
+            needs_inert_prefix = true;
+        }
+    }
+    if needs_inert_prefix
+        && !skipped
+            .iter()
+            .all(|&idx| stmt_is_inert(&stmts[idx], level, unresolved_mark))
+    {
+        return false;
+    }
+    true
+}
+
+/// What a hoisted default reads: bindings referenced directly (closures are
+/// skipped, they read at call time), and whether it also reads globals or
+/// properties, whose values only inert skipped statements leave unchanged.
+struct DefaultDependencies {
+    bindings: Vec<BindingId>,
+    needs_inert_prefix: bool,
+}
+
+fn default_dependencies(expr: &Expr, unresolved_mark: Mark) -> DefaultDependencies {
+    struct Collector {
+        unresolved_mark: Mark,
+        dependencies: DefaultDependencies,
+    }
+
+    impl Visit for Collector {
+        fn visit_ident(&mut self, ident: &Ident) {
+            if is_undefined_ident(ident, self.unresolved_mark) {
+                return;
+            }
+            if ident.ctxt.outer() == self.unresolved_mark {
+                self.dependencies.needs_inert_prefix = true;
+            } else {
+                self.dependencies
+                    .bindings
+                    .push((ident.sym.clone(), ident.ctxt));
+            }
+        }
+
+        fn visit_member_expr(&mut self, member: &MemberExpr) {
+            self.dependencies.needs_inert_prefix = true;
+            member.visit_children_with(self);
+        }
+
+        fn visit_function(&mut self, _: &Function) {}
+        fn visit_arrow_expr(&mut self, _: &ArrowExpr) {}
+        fn visit_class(&mut self, _: &swc_core::ecma::ast::Class) {}
+    }
+
+    let mut collector = Collector {
+        unresolved_mark,
+        dependencies: DefaultDependencies {
+            bindings: Vec::new(),
+            needs_inert_prefix: false,
+        },
+    };
+    expr.visit_with(&mut collector);
+    collector.dependencies
+}
+
+/// True when `stmt` may write `binding`: it assigns or updates it directly,
+/// declares it again, or creates a closure (function, arrow, class) that
+/// mentions it and could therefore run before the guard.
+fn stmt_may_write_binding(stmt: &Stmt, binding: &BindingId) -> bool {
+    struct Detector<'a> {
+        binding: &'a BindingId,
+        closure_depth: usize,
+        found: bool,
+    }
+
+    impl Detector<'_> {
+        fn matches(&self, ident: &Ident) -> bool {
+            ident.sym == self.binding.0 && ident.ctxt == self.binding.1
+        }
+
+        fn in_closure<N: VisitWith<Self>>(&mut self, node: &N) {
+            self.closure_depth += 1;
+            node.visit_children_with(self);
+            self.closure_depth -= 1;
+        }
+    }
+
+    impl Visit for Detector<'_> {
+        fn visit_ident(&mut self, ident: &Ident) {
+            if self.closure_depth > 0 && self.matches(ident) {
+                self.found = true;
+            }
+        }
+
+        fn visit_binding_ident(&mut self, ident: &BindingIdent) {
+            if self.matches(&ident.id) {
+                self.found = true;
+            }
+        }
+
+        fn visit_simple_assign_target(&mut self, target: &SimpleAssignTarget) {
+            if let SimpleAssignTarget::Ident(ident) = target {
+                if self.matches(&ident.id) {
+                    self.found = true;
+                }
+            }
+            target.visit_children_with(self);
+        }
+
+        fn visit_update_expr(&mut self, update: &UpdateExpr) {
+            if let Expr::Ident(ident) = update.arg.as_ref() {
+                if self.matches(ident) {
+                    self.found = true;
+                }
+            }
+            update.visit_children_with(self);
+        }
+
+        fn visit_function(&mut self, function: &Function) {
+            self.in_closure(function);
+        }
+
+        fn visit_arrow_expr(&mut self, arrow: &ArrowExpr) {
+            self.in_closure(arrow);
+        }
+
+        fn visit_constructor(&mut self, constructor: &Constructor) {
+            self.in_closure(constructor);
+        }
+
+        fn visit_class(&mut self, class: &swc_core::ecma::ast::Class) {
+            self.in_closure(class);
+        }
+    }
+
+    let mut detector = Detector {
+        binding,
+        closure_depth: 0,
+        found: false,
+    };
+    stmt.visit_with(&mut detector);
+    detector.found
+}
+
+/// A statement that declares without running anything observable: an empty
+/// statement, a function declaration, or a variable declaration whose
+/// initializers are pure default expressions (`var _this = this;`, `let t;`).
+/// Object destructuring declarations (`let { a, b } = t;`) count at
+/// `standard+`: they only perform property reads (`pure_getters`). Array
+/// patterns run iterator code and never count.
+fn stmt_is_inert(stmt: &Stmt, level: RewriteLevel, unresolved_mark: Mark) -> bool {
+    match stmt {
+        Stmt::Empty(_) | Stmt::Decl(Decl::Fn(_)) => true,
+        Stmt::Decl(Decl::Var(var)) => var.decls.iter().all(|decl| {
+            is_inert_binding_pat(&decl.name, level, unresolved_mark)
+                && decl
+                    .init
+                    .as_deref()
+                    .is_none_or(|init| is_pure_default_expr(init, level, unresolved_mark))
+        }),
+        _ => false,
+    }
+}
+
+fn is_inert_binding_pat(pat: &Pat, level: RewriteLevel, unresolved_mark: Mark) -> bool {
+    match pat {
+        Pat::Ident(_) => true,
+        Pat::Object(object) if level >= RewriteLevel::Standard => {
+            object.props.iter().all(|prop| match prop {
+                ObjectPatProp::Assign(assign) => assign
+                    .value
+                    .as_deref()
+                    .is_none_or(|value| is_pure_default_expr(value, level, unresolved_mark)),
+                ObjectPatProp::KeyValue(kv) => {
+                    !matches!(kv.key, PropName::Computed(_))
+                        && is_inert_binding_pat(&kv.value, level, unresolved_mark)
+                }
+                ObjectPatProp::Rest(_) => false,
+            })
+        }
+        Pat::Assign(assign) => {
+            is_inert_binding_pat(&assign.left, level, unresolved_mark)
+                && is_pure_default_expr(&assign.right, level, unresolved_mark)
+        }
+        _ => false,
+    }
+}
+
+/// Bindings mentioned by function declarations anywhere in the body. Those
+/// are hoisted, so any earlier statement may call them.
+struct HoistedFnDeclMentions {
+    bindings: Vec<BindingId>,
+}
+
+impl HoistedFnDeclMentions {
+    fn collect(body: &FunctionBody) -> Self {
+        struct Collector {
+            bindings: Vec<BindingId>,
+        }
+        impl Visit for Collector {
+            fn visit_fn_decl(&mut self, decl: &FnDecl) {
+                let mut mentions = BindingMentionCollector {
+                    bindings: Vec::new(),
+                };
+                decl.function.visit_with(&mut mentions);
+                self.bindings.extend(mentions.bindings);
+                decl.visit_children_with(self);
+            }
+        }
+        let mut collector = Collector {
+            bindings: Vec::new(),
+        };
+        body.visit_with(&mut collector);
+        Self {
+            bindings: collector.bindings,
+        }
+    }
+
+    fn mentions(&self, binding: &BindingId) -> bool {
+        self.bindings.contains(binding)
+    }
+}
+
+struct BindingMentionCollector {
+    bindings: Vec<BindingId>,
+}
+
+impl Visit for BindingMentionCollector {
+    fn visit_ident(&mut self, ident: &Ident) {
+        self.bindings.push((ident.sym.clone(), ident.ctxt));
+    }
+}
+
+/// True when `stmt` mentions `binding` anywhere, including inside nested
+/// closures (a closure created here may run before the guard).
+fn stmt_mentions_binding(stmt: &Stmt, binding: &BindingId) -> bool {
+    let mut collector = BindingMentionCollector {
+        bindings: Vec::new(),
+    };
+    stmt.visit_with(&mut collector);
+    collector.bindings.contains(binding)
+}
+
+/// A default that can run earlier than its guard without anyone noticing:
+/// literals, function values, `this`, resolved identifier reads (body-declared
+/// bindings are already rejected as TDZ hazards), and structures of those.
+/// Property reads are `standard+` (`pure_getters`); unresolved global reads
+/// likewise, since an undeclared global throws.
+fn is_pure_default_expr(expr: &Expr, level: RewriteLevel, unresolved_mark: Mark) -> bool {
+    let pure = |inner: &Expr| is_pure_default_expr(inner, level, unresolved_mark);
+    match strip_parens(expr) {
+        Expr::Lit(_) | Expr::This(_) | Expr::Fn(_) | Expr::Arrow(_) => true,
+        Expr::Ident(ident) => {
+            is_undefined_ident(ident, unresolved_mark)
+                || ident.ctxt.outer() != unresolved_mark
+                || level >= RewriteLevel::Standard
+        }
+        Expr::Tpl(template) => template.exprs.is_empty(),
+        Expr::Unary(unary) => match unary.op {
+            UnaryOp::Bang | UnaryOp::TypeOf | UnaryOp::Void => pure(&unary.arg),
+            // Numeric coercion can call `valueOf` on an object operand, and
+            // unary plus throws on a BigInt (`+1n`); `-1n` and `~1n` are fine.
+            UnaryOp::Minus | UnaryOp::Tilde => matches!(strip_parens(&unary.arg), Expr::Lit(_)),
+            UnaryOp::Plus => {
+                matches!(strip_parens(&unary.arg), Expr::Lit(lit) if !matches!(lit, Lit::BigInt(_)))
+            }
+            UnaryOp::Delete => false,
+        },
+        Expr::Array(array) => array.elems.iter().all(|elem| match elem {
+            None => true,
+            Some(elem) => elem.spread.is_none() && pure(&elem.expr),
+        }),
+        Expr::Object(object) => object.props.iter().all(|prop| match prop {
+            PropOrSpread::Spread(_) => false,
+            PropOrSpread::Prop(prop) => match prop.as_ref() {
+                Prop::Shorthand(ident) => pure(&Expr::Ident(ident.clone())),
+                Prop::KeyValue(kv) => {
+                    matches!(
+                        kv.key,
+                        PropName::Ident(_) | PropName::Str(_) | PropName::Num(_)
+                    ) && pure(&kv.value)
+                }
+                Prop::Method(method) => !matches!(method.key, PropName::Computed(_)),
+                Prop::Getter(_) | Prop::Setter(_) | Prop::Assign(_) => false,
+            },
+        }),
+        Expr::Bin(binary) => {
+            matches!(
+                binary.op,
+                BinaryOp::LogicalOr | BinaryOp::LogicalAnd | BinaryOp::NullishCoalescing
+            ) && pure(&binary.left)
+                && pure(&binary.right)
+        }
+        Expr::Cond(cond) => pure(&cond.test) && pure(&cond.cons) && pure(&cond.alt),
+        Expr::Member(member) => {
+            level >= RewriteLevel::Standard && is_pure_static_member_read(member)
+        }
+        _ => false,
+    }
+}
+
+fn is_pure_static_member_read(member: &MemberExpr) -> bool {
+    let key_is_static = match &member.prop {
+        MemberProp::Ident(_) | MemberProp::PrivateName(_) => true,
+        MemberProp::Computed(computed) => {
+            matches!(computed.expr.as_ref(), Expr::Lit(Lit::Str(_) | Lit::Num(_)))
+        }
+    };
+    if !key_is_static {
+        return false;
+    }
+    match strip_parens(&member.obj) {
+        Expr::Ident(_) | Expr::This(_) => true,
+        Expr::Member(inner) => is_pure_static_member_read(inner),
+        _ => false,
+    }
+}
+
+/// True when the function body (including nested arrows, which share the
+/// activation) can observe whether `arguments` is mapped to the parameters:
+/// any use of `arguments` other than `arguments.length` or a literal index at
+/// or past the parameter count, or a direct `eval` that may mention it.
+fn function_observes_parameter_mapping(
+    body: &FunctionBody,
+    param_count: usize,
+    unresolved_mark: Mark,
+) -> bool {
+    let mut eval_analyzer = DirectEvalAnalyzer::default();
+    body.visit_with(&mut eval_analyzer);
+    if eval_analyzer.unknown_direct_eval {
+        return true;
+    }
+    let arguments_name: Atom = "arguments".into();
+    if eval_analyzer
+        .known_direct_eval_sources
+        .iter()
+        .any(|source| js_source_mentions_binding(source, &arguments_name))
+    {
+        return true;
+    }
+
+    let mut detector = MappedArgumentsObserver {
+        unresolved_mark,
+        param_count,
+        found: false,
+    };
+    body.visit_with(&mut detector);
+    detector.found
+}
+
+struct MappedArgumentsObserver {
+    unresolved_mark: Mark,
+    param_count: usize,
+    found: bool,
+}
+
+impl Visit for MappedArgumentsObserver {
+    fn visit_member_expr(&mut self, member: &MemberExpr) {
+        if let Expr::Ident(obj) = member.obj.as_ref() {
+            if is_arguments_ident(obj, self.unresolved_mark) {
+                let unmapped_read = match &member.prop {
+                    MemberProp::Ident(prop) => prop.sym.as_ref() == "length",
+                    MemberProp::Computed(computed) => match computed.expr.as_ref() {
+                        Expr::Lit(Lit::Num(index)) => {
+                            index.value.fract() == 0.0
+                                && index.value >= 0.0
+                                && index.value >= self.param_count as f64
+                        }
+                        _ => false,
+                    },
+                    MemberProp::PrivateName(_) => false,
+                };
+                if !unmapped_read {
+                    self.found = true;
+                }
+                if let MemberProp::Computed(computed) = &member.prop {
+                    computed.expr.visit_with(self);
+                }
+                return;
+            }
+        }
+        member.visit_children_with(self);
+    }
+
+    fn visit_ident(&mut self, ident: &Ident) {
+        if is_arguments_ident(ident, self.unresolved_mark) {
+            self.found = true;
+        }
+    }
+
+    // Nested regular functions and class constructors have their own
+    // `arguments`; arrows do not.
+    fn visit_function(&mut self, _: &Function) {}
+    fn visit_constructor(&mut self, _: &Constructor) {}
+}
+
 fn process_pattern_a_arrow_params(
     params: &mut Vec<Pat>,
     body: &mut FunctionBody,
+    level: RewriteLevel,
     unresolved_mark: Mark,
     body_bindings: &[BindingId],
 ) {
+    // Arrows have no `arguments` of their own, so only the hoisting proof
+    // matters here; see `process_pattern_a_params`.
+    let hoisted_fn_mentions = HoistedFnDeclMentions::collect(body);
+    let param_bindings = current_or_later_arrow_param_bindings(params, 0);
     let mut to_remove: Vec<usize> = Vec::new();
+    let mut skipped: Vec<usize> = Vec::new();
+    let mut last_param_idx: Option<usize> = None;
 
-    let scan_limit = body.stmts.len().min(15);
-
-    for (stmt_idx, stmt) in body.stmts[..scan_limit].iter().enumerate() {
-        let extracted = extract_default_param_from_if(stmt, unresolved_mark);
-
-        if let Some((param_ident, default_val)) = extracted {
-            if let Some(param_idx) = find_plain_pat_idx(params, &param_ident) {
+    let scan_limit = body.stmts.len().min(PATTERN_A_SCAN_LIMIT);
+    for stmt_idx in 0..scan_limit {
+        let stmt = &body.stmts[stmt_idx];
+        let candidate = extract_default_param_from_if(stmt, unresolved_mark).and_then(
+            |(param_ident, default_val)| {
+                let param_idx = find_plain_pat_idx(params, &param_ident)?;
+                if last_param_idx.is_some_and(|last| param_idx <= last) {
+                    return None;
+                }
                 if default_references_blocked_arrow_binding(
                     params,
                     param_idx,
                     &default_val,
                     body_bindings,
                 ) {
-                    continue;
+                    return None;
                 }
-                let original_pat =
-                    std::mem::replace(&mut params[param_idx], Pat::Invalid(Default::default()));
-                params[param_idx] = Pat::Assign(AssignPat {
-                    span: DUMMY_SP,
-                    left: Box::new(original_pat),
-                    right: default_val,
-                });
-                to_remove.push(stmt_idx);
-            }
-        }
+                let binding = (param_ident.sym.clone(), param_ident.ctxt);
+                if !can_hoist_default_past_skipped(
+                    &body.stmts,
+                    &skipped,
+                    &binding,
+                    &param_bindings,
+                    &default_val,
+                    &hoisted_fn_mentions,
+                    level,
+                    unresolved_mark,
+                ) {
+                    return None;
+                }
+                Some((param_idx, default_val))
+            },
+        );
+        let Some((param_idx, default_val)) = candidate else {
+            skipped.push(stmt_idx);
+            continue;
+        };
+        let original_pat =
+            std::mem::replace(&mut params[param_idx], Pat::Invalid(Default::default()));
+        params[param_idx] = Pat::Assign(AssignPat {
+            span: DUMMY_SP,
+            left: Box::new(original_pat),
+            right: default_val,
+        });
+        to_remove.push(stmt_idx);
+        last_param_idx = Some(param_idx);
     }
 
     for idx in to_remove.into_iter().rev() {
