@@ -267,7 +267,9 @@ rationale, or level gating appear.
 - **UnIife** — two passes; the second catches IIFEs created by SmartInline.
   Exposes class IIFEs for UnEs6Class and enum IIFEs for UnEnum. Gating:
   param cleanup and literal hoisting are `standard+`; `.call()` unwrapping on
-  arrows runs at all levels.
+  arrows runs at all levels. Positional argument/parameter pairing stops at
+  the first spread argument: its runtime length makes later syntactic
+  positions unknown, so only arguments before it are extracted or renamed.
 
 ### Complex pattern restoration
 

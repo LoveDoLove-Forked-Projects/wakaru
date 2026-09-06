@@ -328,6 +328,12 @@ where
     }
     let binding_uses = BindingUseIndex::collect_stmts(&body.stmts);
     for (i, arg) in args.iter().enumerate().take(param_count) {
+        // A spread argument has a runtime length, so from this position on the
+        // syntactic argument index no longer identifies the parameter it
+        // initializes. Stop positional reasoning here.
+        if arg.spread.is_some() {
+            break;
+        }
         let Some((param_sym, param_ctxt)) = param_at(i) else {
             continue;
         };

@@ -780,3 +780,61 @@ fn iife_dot_call_module_21_pipeline_strips_wrapper() {
     let output = apply(input);
     insta::assert_snapshot!(output);
 }
+
+// --- spread arguments break the positional argument/parameter pairing ---
+
+#[test]
+fn literal_after_spread_argument_is_not_paired_with_a_parameter() {
+    // `...xs` has a runtime length: `3` initializes `c` when `xs` has two
+    // elements, not `b`. Pairing it with `b` returned `[1, 2]` for `[1, 3]`.
+    let input = r#"
+function run(xs) {
+  return (function(a, b, c) { return [a, c]; })(...xs, 3);
+}
+"#;
+    // Only the printer's parenthesization differs from the input.
+    let expected = r#"
+function run(xs) {
+  return function(a, b, c) {
+    return [a, c];
+  }(...xs, 3);
+}
+"#;
+    assert_eq_normalized(&apply_rule(input), expected);
+}
+
+#[test]
+fn identifier_after_spread_argument_is_not_renamed_into_a_parameter() {
+    let input = r#"
+function run(xs, value) {
+  return (function(a, b) { return [a, b]; })(...xs, value);
+}
+"#;
+    let expected = r#"
+function run(xs, value) {
+  return function(a, b) {
+    return [a, b];
+  }(...xs, value);
+}
+"#;
+    assert_eq_normalized(&apply_rule(input), expected);
+}
+
+#[test]
+fn literal_before_spread_argument_is_still_extracted() {
+    // Positions before the spread are exact; only the tail is unknown.
+    let input = r#"
+function run(xs) {
+  return (function(a, b, c) { return [a, b, c]; })(1, ...xs);
+}
+"#;
+    let expected = r#"
+function run(xs) {
+  return function(b, c) {
+    const a = 1;
+    return [a, b, c];
+  }(...xs);
+}
+"#;
+    assert_eq_normalized(&apply_rule(input), expected);
+}
