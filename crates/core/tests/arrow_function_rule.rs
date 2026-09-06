@@ -756,3 +756,92 @@ f = async function named() { return 1; };
     let output = apply(input);
     assert_eq_normalized(&output, input);
 }
+
+// --- parameter initializers share the function's own bindings ---
+
+#[test]
+fn arguments_in_default_parameter_stays_function() {
+    // `arguments.length` in the initializer reads the callee's own arguments
+    // object (0 here). An arrow would read `outer`'s arguments (2).
+    let input = r#"
+function outer() {
+  var f = function(a = arguments.length) { return a; };
+  return f();
+}
+"#;
+    assert_eq_normalized(&apply(input), input);
+}
+
+#[test]
+fn this_in_default_parameter_stays_function() {
+    let input = r#"
+var f = function(a = this.x) { return a; };
+"#;
+    assert_eq_normalized(&apply(input), input);
+}
+
+#[test]
+fn new_target_in_default_parameter_stays_function() {
+    // `new.target` is a syntax error inside a top-level arrow parameter list.
+    let input = r#"
+var f = function(a = new.target) { return a; };
+"#;
+    assert_eq_normalized(&apply(input), input);
+}
+
+#[test]
+fn arguments_in_destructured_default_stays_function() {
+    let input = r#"
+var f = function({ a = arguments[0] }) { return a; };
+"#;
+    assert_eq_normalized(&apply(input), input);
+}
+
+#[test]
+fn direct_eval_in_default_parameter_stays_function() {
+    let input = r#"
+var f = function(a = eval("arguments")) { return a; };
+"#;
+    assert_eq_normalized(&apply(input), input);
+}
+
+#[test]
+fn plain_default_parameter_still_converts() {
+    // Control: an initializer without function-only bindings is fine.
+    let input = r#"
+var f = function(a = 1, { b = 2 } = {}) { return a + b; };
+"#;
+    let expected = r#"
+var f = (a = 1, { b = 2 } = {}) => {
+    return a + b;
+};
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
+
+#[test]
+fn bind_this_with_arguments_in_default_stays_function() {
+    let input = r#"
+a(function(x = arguments[1]) { this.x = x; }.bind(this));
+"#;
+    let expected = r#"
+a((function(x = arguments[1]) {
+    this.x = x;
+}).bind(this));
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
+
+#[test]
+fn bind_this_with_this_in_default_converts() {
+    // `.bind(this)` locks the same `this` the initializer would see.
+    let input = r#"
+a(function(x = this.y) { this.x = x; }.bind(this));
+"#;
+    let expected = r#"
+a((x = this.y) => {
+    this.x = x;
+});
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}

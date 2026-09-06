@@ -4,8 +4,8 @@ use swc_core::common::{SyntaxContext, DUMMY_SP};
 
 use swc_core::ecma::ast::{
     ArrowExpr, ArrowFunctionBody, AssignExpr, AssignTarget, BinExpr, BinaryOp, CallExpr, Callee,
-    Class, Expr, FnExpr, Function, FunctionBody, Ident, KeyValueProp, MemberExpr, MemberProp,
-    MetaPropExpr, MetaPropKind, Module, NewExpr, Pat, ThisExpr, VarDeclarator,
+    Class, Expr, FnExpr, Function, Ident, KeyValueProp, MemberExpr, MemberProp, MetaPropExpr,
+    MetaPropKind, Module, NewExpr, Pat, ThisExpr, VarDeclarator,
 };
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
@@ -257,18 +257,20 @@ fn try_convert_to_arrow(fn_expr: &mut FnExpr) -> Option<ArrowExpr> {
     }
 
     // Must have a body
-    let body = func.body.as_ref()?;
+    func.body.as_ref()?;
 
     // Direct eval can observe function-only bindings (`this`, `arguments`,
     // `new.target`) that are not visible to an AST walk of the containing
     // function. Keep the function shape rather than guessing from source text.
-    if body_has_arrow_sensitive_direct_eval(body, true) {
+    if function_has_arrow_sensitive_direct_eval(func, true) {
         return None;
     }
 
-    // Check for this or arguments usage (don't recurse into nested functions)
+    // Check for this or arguments usage (don't recurse into nested functions).
+    // Parameter initializers run inside the function's own scope, so they
+    // bind `this`, `arguments`, and `new.target` exactly like the body does.
     let mut checker = HasThisOrArguments(false);
-    body.visit_with(&mut checker);
+    visit_params_and_body(func, &mut checker);
     if checker.0 {
         return None;
     }
@@ -351,19 +353,14 @@ fn try_convert_bind_this(call: &CallExpr) -> Option<ArrowExpr> {
         return None;
     }
 
-    if func
-        .body
-        .as_ref()
-        .is_some_and(|body| body_has_arrow_sensitive_direct_eval(body, false))
-    {
+    if function_has_arrow_sensitive_direct_eval(func, false) {
         return None;
     }
 
-    // Reject functions that use `arguments` (arrows have no own `arguments`)
+    // Reject functions that use `arguments` (arrows have no own `arguments`),
+    // in parameter initializers as well as in the body.
     let mut has_args = HasArguments(false);
-    if let Some(body) = &func.body {
-        body.visit_with(&mut has_args);
-    }
+    visit_params_and_body(func, &mut has_args);
     if has_args.0 {
         return None;
     }
@@ -383,9 +380,21 @@ fn try_convert_bind_this(call: &CallExpr) -> Option<ArrowExpr> {
     })
 }
 
-fn body_has_arrow_sensitive_direct_eval(body: &FunctionBody, include_this: bool) -> bool {
+/// Runs `visitor` over the parameter list and the body of `func`: both are
+/// evaluated in the function's own activation, so a check for function-only
+/// bindings must cover parameter initializers and patterns too.
+fn visit_params_and_body<V: Visit>(func: &Function, visitor: &mut V) {
+    for param in &func.params {
+        param.visit_with(visitor);
+    }
+    if let Some(body) = &func.body {
+        body.visit_with(visitor);
+    }
+}
+
+fn function_has_arrow_sensitive_direct_eval(func: &Function, include_this: bool) -> bool {
     let mut analyzer = ArrowSensitiveDirectEvalAnalyzer::default();
-    body.visit_with(&mut analyzer);
+    visit_params_and_body(func, &mut analyzer);
     if analyzer.unknown_direct_eval {
         return true;
     }

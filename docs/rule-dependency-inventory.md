@@ -360,6 +360,9 @@ rationale, or level gating appear.
   even though it checks known blockers (`this`, `arguments`, named function
   expressions, `new.target`, and ordinary-function values required by `new`,
   `Reflect.construct`, `extends`, `instanceof`, or `.prototype` observation).
+  The `this`/`arguments`/`new.target`/direct-eval checks cover parameter
+  initializers and destructuring defaults as well as the body; both run in
+  the function's own activation.
   Arrows lack `prototype` and cannot be constructed, so broad conversion is not
   a `minimal`-safe transform.
 - **UnForOf** — `standard+`. TypeScript/Babel/SWC helper recovery is
