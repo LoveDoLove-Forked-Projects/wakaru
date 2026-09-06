@@ -1171,8 +1171,9 @@ use(primary, backup, _f);
 #[test]
 fn complete_default_pattern_drops_proven_sliced_to_array_call() {
     // UnSlicedToArray leaves default elements alone, so the ref still holds
-    // the helper result. The pattern reads exactly the two materialized
-    // elements, so the helper's source can be destructured directly.
+    // the helper result. This complete two-element pattern is recovered under
+    // `iterator_materialization_independence`; equal counts do not prove that
+    // defaults and iterator operations have the same evaluation order.
     let input = r#"
 import _slicedToArray from "@babel/runtime/helpers/slicedToArray";
 var _ref2 = _slicedToArray(_ref, 2);

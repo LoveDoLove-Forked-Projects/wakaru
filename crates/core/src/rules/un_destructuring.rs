@@ -1361,8 +1361,10 @@ fn try_reconstruct_ref_group(
 
     let pat = build_pat_from_accesses(collected.accesses)?;
     // `UnSlicedToArray` leaves default elements to this rule, so the ref may
-    // still hold the materialized helper result. Once the pattern covers the
-    // same N elements, destructure the helper's source directly.
+    // still hold the materialized helper result. Under the standard-level
+    // `iterator_materialization_independence` assumption, a complete N-element
+    // pattern recovers the source even though defaults may interleave with
+    // iterator steps differently from the materialized helper result.
     if let Some((source, helper)) =
         complete_sliced_to_array_source(&ref_decl.init, &pat, sliced_to_array_helpers)
     {
@@ -1378,10 +1380,11 @@ fn try_reconstruct_ref_group(
     })
 }
 
-/// `[a, b = d] = x` reads exactly the elements `helper(x, N)` materializes.
 /// Returns the helper's source and binding when `init` is a proven
 /// sliced-to-array call whose length literal equals the pattern's element
 /// count and the pattern has no rest element (the helper truncates to N).
+/// Equal counts do not prove evaluation-order equivalence; default groups
+/// rely on `iterator_materialization_independence` for source recovery.
 fn complete_sliced_to_array_source(
     init: &Expr,
     pat: &Pat,

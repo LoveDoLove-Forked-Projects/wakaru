@@ -272,8 +272,14 @@ result is still used. Groups with default elements are the one hand-off:
 `UnSlicedToArray` skips them, and `UnDestructuring` drops the proven helper
 call when the rebuilt top-level pattern covers exactly the `N` elements the
 call materializes and has no rest element. `UnParameters2` then folds that
-pattern into the parameter as before. Helper origin/binding identity alone is
-not enough to remove the call: `UnDestructuring` filters these candidates with
+pattern into the parameter as before. Equal `N` establishes the group shape,
+not default/iterator evaluation order. This recovery uses the
+[`iterator_materialization_independence`](rewrite-assumptions.md#iterator_materialization_independence)
+assumption at `standard` and above; `minimal` retains materialization for these
+default groups.
+
+Helper origin/binding identity alone is not enough to remove the call:
+`UnDestructuring` filters these candidates with
 `BindingUseIndex::collect_direct_write_bindings`, including writes in nested
 functions. A write to a different, shadowed binding does not disqualify the
 helper. This is a consumer requirement; other recognized helpers may legitimately

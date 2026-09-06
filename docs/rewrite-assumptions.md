@@ -68,6 +68,60 @@ Level: receiver-changing `UnIndirectCall` and `UnEsm` forms require `standard`
 or above. Explicit transpiler-helper recovery in `UnInteropRequireDefault`
 applies whenever that helper is recognized.
 
+### `iterator_materialization_independence`
+
+The program does not depend on the eager iterator materialization introduced by
+transpiler helpers, including its ordering relative to destructuring defaults.
+
+For a recognized sliced-to-array helper and a complete default pattern,
+`standard` prefers recovery of the pre-transpile source. Matching the helper's
+literal limit `N` to the pattern's element count constrains the group shape; it
+does not prove that iterator steps, defaults, and iterator closing happen in
+the same order.
+
+For example, start each variant with this state:
+
+```js
+let nextValue = 1;
+function fallback() { nextValue = 99; return 7; }
+function* values() {
+  yield undefined;
+  yield nextValue;
+}
+```
+
+Babel's helper first materializes both values and closes the iterator, then the
+lowered code evaluates the default:
+
+```js
+const tmp = _slicedToArray(values(), 2);
+const a = tmp[0] === undefined ? fallback() : tmp[0];
+const b = tmp[1]; // 1
+```
+
+The recovered pattern evaluates the default before requesting the second value:
+
+```js
+const [a = fallback(), b] = values(); // a = 7, b = 99
+```
+
+This difference was reproduced with `@babel/plugin-transform-destructuring`
+7.28.5 using its default options, without `loose` or extra compiler assumptions.
+It affects later iterator values as well as `IteratorClose` timing; equal `N`
+is not an equivalence proof. Recovering the original source can therefore change
+the behavior of the compiled input in this edge case.
+
+This assumption does not relax helper identity, reassignment, temporary-use,
+or complete-pattern checks. An unproven or reassigned helper call must remain.
+See [helper detection](helper-detection.md) for those proof requirements.
+
+Affects: `UnDestructuring` (complete sliced-helper groups with defaults).
+`UnParameters2` may subsequently fold the recovered pattern into a parameter.
+
+Level: `standard` and above. `minimal` retains the helper materialization for
+these default groups. This documents the existing source-recovery policy; it
+does not broaden the matcher to incomplete patterns or arbitrary helper calls.
+
 ### `no_document_all`
 
 The input does not depend on the legacy `document.all` falsy-object behavior.
