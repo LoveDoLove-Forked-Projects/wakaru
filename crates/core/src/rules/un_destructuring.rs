@@ -107,6 +107,15 @@ impl VisitMut for UnDestructuring {
             let local_helpers = LocalHelperContext::collect_with_mark(module, self.unresolved_mark);
             self.sliced_to_array_helpers = Some(collect_sliced_to_array_helpers(&local_helpers));
         }
+        // Helper detection proves origin and binding identity, not that the
+        // binding still holds that function. Removing a call additionally
+        // requires no writes, including writes inside deferred closures.
+        let written =
+            crate::analysis::binding_uses::BindingUseIndex::collect_direct_write_bindings(module);
+        self.sliced_to_array_helpers
+            .as_mut()
+            .expect("helper identities were collected above")
+            .retain(|key| !written.contains(key));
         self.array_like_to_array_helpers = Some(collect_array_like_to_array_helpers(
             module,
             self.unresolved_mark,

@@ -1222,3 +1222,54 @@ use(head, second);
 "#;
     assert_eq_normalized(&apply(unproven), expected_unproven);
 }
+
+#[test]
+fn complete_default_pattern_keeps_reassigned_helper_binding() {
+    for write in [
+        "h = custom;",
+        "[h] = replacements;",
+        "function replace() { h = custom; }",
+    ] {
+        let input = format!(
+            r#"
+var h = require("@babel/runtime/helpers/slicedToArray");
+{write}
+var _ref2 = h(items, 2);
+var head = _ref2[0];
+var _ref2$ = _ref2[1];
+var second = _ref2$ === undefined ? fallback : _ref2$;
+use(head, second);
+"#
+        );
+        let output = apply(&input);
+        assert!(
+            output.contains("= h(items, 2)"),
+            "reassigned helper must still be called: {output}"
+        );
+    }
+}
+
+#[test]
+fn complete_default_pattern_ignores_writes_to_shadowed_helper_name() {
+    let input = r#"
+var h = require("@babel/runtime/helpers/slicedToArray");
+function replace(h) { h = custom; }
+var _ref2 = h(items, 2);
+var head = _ref2[0];
+var _ref2$ = _ref2[1];
+var second = _ref2$ === undefined ? fallback : _ref2$;
+use(head, second);
+"#;
+    let output = apply(input);
+    assert!(
+        output.contains("[head, second = fallback] = items"),
+        "{output}"
+    );
+}
+
+#[test]
+fn pipeline_keeps_reassigned_inline_sliced_helper_with_default_pattern() {
+    let input = include_str!("fixtures/reassigned-sliced-default.js");
+    let output = render_pipeline_until_with_level(input, "UnDestructuring", RewriteLevel::Standard);
+    assert!(output.contains("= _slicedToArray(items, 2)"), "{output}");
+}
