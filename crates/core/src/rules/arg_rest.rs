@@ -13,6 +13,7 @@ use super::decl_utils::{
     binding_id, contains_use_strict_string_statement, has_direct_use_strict_directive,
     ident_matches_binding, BindingId,
 };
+use super::rename_utils::{rename_bindings, BindingRename};
 use super::RewriteLevel;
 
 /// Replaces `arguments[N]` / `arguments.length` patterns with a rest parameter
@@ -71,9 +72,11 @@ impl VisitMut for ArgRest {
             return;
         }
 
-        let rest_ident = copy_var
-            .clone()
-            .unwrap_or_else(|| Ident::new_no_ctxt(fresh_rest_name(body, &func.params), DUMMY_SP));
+        let rest_ident = prepare_rest_ident(
+            func.body.as_mut().expect("body was checked above"),
+            &func.params,
+            copy_var.as_ref(),
+        );
         func.params.push(make_rest_param(rest_ident.clone()));
 
         // Rewrite `arguments` → rest param in the body
@@ -131,9 +134,11 @@ impl VisitMut for ArgRest {
             return;
         }
 
-        let rest_ident = copy_var
-            .clone()
-            .unwrap_or_else(|| Ident::new_no_ctxt(fresh_rest_name(body, &ctor.params), DUMMY_SP));
+        let rest_ident = prepare_rest_ident(
+            ctor.body.as_mut().expect("body was checked above"),
+            &ctor.params,
+            copy_var.as_ref(),
+        );
         ctor.params.push(ParamOrTsParamProp::Param(make_rest_param(
             rest_ident.clone(),
         )));
@@ -163,8 +168,8 @@ impl VisitMut for ArgRest {
 
 /// Scan `body` for the Babel rest-args copy pattern **before** `arguments` is rewritten.
 /// Returns the copy variable's name (e.g. `i`, `r`, `t`) so it can be reused as the
-/// rest param — this avoids any naming conflicts because minified copy vars are already
-/// unique within their enclosing scope.
+/// rest param. Its name may still be shadowed inside a nested arrow where an
+/// arguments read will be inserted; `prepare_rest_ident` checks that separately.
 ///
 /// Pattern matched (3-declarator for-init, `arguments.length` as source):
 /// ```text
@@ -664,20 +669,50 @@ impl Visit for ArgumentsMentionDetector {
     fn visit_constructor(&mut self, _: &Constructor) {}
 }
 
-/// Picks the rest parameter name: `args`, or `args_1`, `args_2`, ... when the
-/// body or parameter list already spells that identifier anywhere (a
-/// declaration, or a reference to an outer binding). Printed JavaScript has no
-/// `SyntaxContext`, so a rest parameter with a spelled name would either be
-/// captured by an inner declaration at a rewritten use site or capture an
-/// existing reference to the outer binding.
-fn fresh_rest_name<P: VisitWith<IdentNameCollector>>(body: &FunctionBody, params: &P) -> Atom {
+/// Reuse a copy binding's name and context when possible. If another binding
+/// has the same printed name, rename the copy and its references before
+/// removing its loop. The nested binding itself must not be renamed.
+fn prepare_rest_ident<P: VisitWith<IdentNameCollector>>(
+    body: &mut FunctionBody,
+    params: &P,
+    copy: Option<&Ident>,
+) -> Ident {
+    let preferred = copy.map_or_else(|| Atom::from("args"), |ident| ident.sym.clone());
+    let name = fresh_rest_name(body, params, preferred, copy.map(binding_id));
+    let Some(copy) = copy else {
+        return Ident::new_no_ctxt(name, DUMMY_SP);
+    };
+    if name != copy.sym {
+        rename_bindings(
+            body,
+            &[BindingRename {
+                old: binding_id(copy),
+                new: name.clone(),
+            }],
+        );
+    }
+    let mut rest = copy.clone();
+    rest.sym = name;
+    rest
+}
+
+/// Printed JavaScript has no SyntaxContext. Reserve every identifier spelling
+/// except the copy binding being replaced, then pick the preferred name or an
+/// unused suffix. This covers both capture of inserted reads and outer names.
+fn fresh_rest_name<P: VisitWith<IdentNameCollector>>(
+    body: &FunctionBody,
+    params: &P,
+    preferred: Atom,
+    copy: Option<BindingId>,
+) -> Atom {
     let mut collector = IdentNameCollector {
         names: HashSet::new(),
+        ignored_binding: copy,
     };
     body.visit_with(&mut collector);
+    collector.ignored_binding = None;
     params.visit_with(&mut collector);
 
-    let preferred: Atom = "args".into();
     if !collector.names.contains(&preferred) {
         return preferred;
     }
@@ -689,10 +724,18 @@ fn fresh_rest_name<P: VisitWith<IdentNameCollector>>(body: &FunctionBody, params
 
 struct IdentNameCollector {
     names: HashSet<Atom>,
+    ignored_binding: Option<BindingId>,
 }
 
 impl Visit for IdentNameCollector {
     fn visit_ident(&mut self, ident: &Ident) {
+        if self
+            .ignored_binding
+            .as_ref()
+            .is_some_and(|binding| ident_matches_binding(ident, binding))
+        {
+            return;
+        }
         self.names.insert(ident.sym.clone());
     }
 }

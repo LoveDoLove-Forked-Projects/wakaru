@@ -361,7 +361,10 @@ rationale, or level gating appear.
   mentions `arguments` blocks the rewrite. The fresh rest name is `args`, or
   `args_1`, `args_2`, ... when the body or parameter list already spells that
   identifier anywhere (a declaration or a reference to an outer binding),
-  since printed code has no `SyntaxContext` to keep them apart.
+  since printed code has no `SyntaxContext` to keep them apart. A reused copy
+  binding gets the same check: if another binding shares its name, choose an
+  unused suffix and rename only the copy binding and its resolved references
+  before removing the loop. This applies to functions and constructors.
 - **ObjMethodShorthand / ArrowFunction** — both consult the shared
   constructor-sensitive value analysis before replacing ordinary function
   values with non-constructible method or arrow syntax. The analysis recognizes

@@ -809,3 +809,49 @@ function f() {
 "#;
     assert_eq_normalized(&apply(input), input);
 }
+
+#[test]
+fn copy_binding_shadowed_by_arrow_parameter_gets_a_fresh_rest_name() {
+    let input = r#"
+function f() {
+    for (var len = arguments.length, copy = Array(len), i = 0; i < len; i++) {
+        copy[i] = arguments[i];
+    }
+    const read = (copy) => arguments[0] + copy;
+    return [copy[0], read(9)];
+}
+"#;
+    let expected = r#"
+function f(...copy_1) {
+    const read = (copy) => copy_1[0] + copy;
+    return [copy_1[0], read(9)];
+}
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
+
+#[test]
+fn constructor_copy_binding_rename_preserves_shadowed_and_outer_references() {
+    let input = r#"
+const copy_1 = 100;
+class C {
+    constructor() {
+        for (var len = arguments.length, copy = Array(len), i = 0; i < len; i++) {
+            copy[i] = arguments[i];
+        }
+        const read = (copy) => arguments[0] + copy + copy_1;
+        this.value = [copy[0], read(9), { copy }];
+    }
+}
+"#;
+    let expected = r#"
+const copy_1 = 100;
+class C {
+    constructor(...copy_2) {
+        const read = (copy) => copy_2[0] + copy + copy_1;
+        this.value = [copy_2[0], read(9), { copy: copy_2 }];
+    }
+}
+"#;
+    assert_eq_normalized(&apply(input), expected);
+}
