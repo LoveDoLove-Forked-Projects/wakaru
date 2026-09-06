@@ -22,10 +22,8 @@ use super::state_machine::{
     invert_condition, stmts_contain_state_opcode_return, ForwardJumpJoin, IndexLoopContinueMode,
     OpcodeReturnScan, StateMachineProgram,
 };
-use super::transpiler_helper_utils::{
-    BindingKey, LocalHelperContext, TranspilerHelperKind, TsHelperKind,
-};
-use super::un_async_await::try_transform_ts_generator_body;
+use super::transpiler_helper_utils::{BindingKey, LocalHelperContext, TranspilerHelperKind};
+use super::un_async_await::{try_transform_ts_generator_body, AsyncHelperContext};
 
 use crate::js_names::is_likely_generated_alias;
 use crate::utils::paren::strip_parens;
@@ -114,10 +112,9 @@ fn run_un_regenerator(
         direct: &async_to_gen_bindings,
         default_members: &async_to_gen_default_members,
     };
-    let generator_helpers: Vec<BindingKey> = local_helpers
-        .ts_helpers_of_kind(TsHelperKind::Generator)
-        .into_iter()
-        .collect();
+    let mut generator_helpers =
+        AsyncHelperContext::from_local_helpers(local_helpers, Some(unresolved_mark));
+    generator_helpers.record_module_hazards(module);
     let regenerator_runtime_helpers = collect_regenerator_runtime_helpers(module);
     let esbuild_async_helpers = collect_esbuild_async_helpers(module, unresolved_mark);
     let esbuild_yield_star_helpers = collect_esbuild_yield_star_helpers(module);
@@ -462,7 +459,7 @@ fn require_source(expr: &Expr, unresolved_mark: Mark) -> Option<Atom> {
 fn transform_babel_async_trampolines(
     module: &mut Module,
     async_to_gen_callees: &AsyncToGenCallees,
-    generator_helpers: &[BindingKey],
+    generator_helpers: &AsyncHelperContext,
     consumed_marks: &mut Vec<BindingKey>,
 ) {
     let mut index = 0;
@@ -589,7 +586,7 @@ fn extract_private_trampoline_body(
     item: &ModuleItem,
     private_key: &BindingKey,
     async_to_gen_callees: &AsyncToGenCallees,
-    generator_helpers: &[BindingKey],
+    generator_helpers: &AsyncHelperContext,
 ) -> Option<(Vec<Param>, Vec<Stmt>, Option<BindingKey>)> {
     let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(fn_decl))) = item else {
         return None;
@@ -717,7 +714,7 @@ fn extract_async_assignment_arg_from_returned_apply(
 
 fn extract_async_to_gen_body_with_params(
     gen_fn_arg: Expr,
-    generator_helpers: &[BindingKey],
+    generator_helpers: &AsyncHelperContext,
 ) -> Option<(Vec<Param>, Vec<Stmt>, Option<BindingKey>)> {
     match gen_fn_arg {
         Expr::Fn(fn_expr) => {
@@ -810,7 +807,7 @@ impl Visit for BindingUseFinder {
 struct FunctionTransformer<'a> {
     unresolved_mark: Mark,
     async_to_gen_callees: &'a AsyncToGenCallees<'a>,
-    generator_helpers: &'a [BindingKey],
+    generator_helpers: &'a AsyncHelperContext,
     esbuild_async_helpers: &'a [BindingKey],
     esbuild_yield_star_helpers: &'a [BindingKey],
     consumed_marks: &'a mut Vec<BindingKey>,
@@ -3949,7 +3946,7 @@ fn is_paramless_async_to_gen_iife(expr: &Expr, async_to_gen_callees: &AsyncToGen
 fn try_transform_async_to_generator_expr(
     expr: Expr,
     async_to_gen_callees: &AsyncToGenCallees,
-    generator_helpers: &[BindingKey],
+    generator_helpers: &AsyncHelperContext,
 ) -> Option<(Expr, Option<BindingKey>)> {
     let Expr::Call(mut call) = expr else {
         return None;
@@ -3973,7 +3970,7 @@ fn try_transform_async_to_generator_expr(
 
 fn build_async_fn_expr_from_gen_arg(
     gen_fn_arg: Expr,
-    generator_helpers: &[BindingKey],
+    generator_helpers: &AsyncHelperContext,
 ) -> Option<(FnExpr, Option<BindingKey>)> {
     match gen_fn_arg {
         Expr::Fn(fn_expr) => {
@@ -4045,7 +4042,7 @@ fn build_async_fn_expr_from_gen_arg(
 fn try_transform_async_to_generator(
     body: &mut FunctionBody,
     async_to_gen_callees: &AsyncToGenCallees,
-    generator_helpers: &[BindingKey],
+    generator_helpers: &AsyncHelperContext,
     _unresolved_mark: Mark,
 ) -> bool {
     let return_idx = body
@@ -4124,7 +4121,7 @@ fn is_async_to_gen_callee(expr: &Expr, async_to_gen_callees: &AsyncToGenCallees)
 fn extract_async_to_gen_body(
     stmt: Stmt,
     async_to_gen_callees: &AsyncToGenCallees,
-    generator_helpers: &[BindingKey],
+    generator_helpers: &AsyncHelperContext,
 ) -> Option<Vec<Stmt>> {
     let Stmt::Return(ret) = stmt else { return None };
     let arg = *ret.arg?;

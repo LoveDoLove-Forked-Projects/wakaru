@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { batchRunner, runMatrix, tscBatch, withTerserVariants } from "../lib/runner.mjs";
+import { batchRunner, runMatrix, swcBatch, tscBatch, withTerserVariants } from "../lib/runner.mjs";
 import { validateModuleRecovery, prewarmModuleRecovery } from "./compare.mjs";
 
 // Each source is a module: importHelpers has no effect on script inputs.
@@ -81,11 +81,30 @@ for (const target of ["ES5", "ES2015"]) {
   }
 }
 
+// Exercise the second consumer of the shared TypeScript generator decoder.
+const mixedSources = snippets.filter((snippet) => snippet.name === "async-await").map((snippet) => snippet.source);
+transformers.push(...withTerserVariants(
+  "swc-es2015-then-tsc-5.9.3-es5-commonjs-import-helpers",
+  mixedSources,
+  batchRunner(async () => {
+    const first = await swcBatch(mixedSources, { target: "es2015" });
+    const inputs = mixedSources.map((source) => first.get(source)).filter((result) => typeof result === "string");
+    const second = await tscBatch(inputs, {
+      version: "5.9.3", target: "ES5", module: "CommonJS", importHelpers: true,
+    });
+    return new Map(mixedSources.map((source) => {
+      const lowered = first.get(source);
+      return [source, typeof lowered === "string" ? second.get(lowered) : lowered];
+    }));
+  }),
+));
+
 runMatrix({
   name: "tslib-helpers",
   snippets: snippets.map(({ targets = ["ES5"], transformerFilter, ...snippet }) => ({
     ...snippet,
     transformerFilter: (tool) => targets.some((target) => tool.name.includes(`-${target.toLowerCase()}-`))
+      && (!tool.name.startsWith("swc-") || snippet.name === "async-await")
       && (!transformerFilter || transformerFilter(tool)),
   })),
   transformers,

@@ -30,6 +30,12 @@ to cover awaiters wrapping native generators. Private fields target ES2015,
 since TypeScript does not support lowering them to ES5. Interop snippets only
 run in CommonJS profiles: an ESM-to-ESM pass would not produce an interop helper.
 
+The async snippet also runs through the shared SWC ES2015 inline-helper
+producer, then TypeScript 5.9.3 ES5 CommonJS with `importHelpers: true`.
+This leaves an SWC async wrapper around a tslib namespace generator and tests
+`UnRegenerator`'s use of the shared decoder context. The checked-in rule fixture
+pins SWC 1.16.2 and TypeScript 5.9.3; the matrix uses the shared SWC tool cache.
+
 ## Comparison and known gaps
 
 The matrix compares the **complete module** with the modern source or an
@@ -53,7 +59,7 @@ runtime compatibility. The script-only execution harness cannot run these
 modules; no `execute` check is claimed. The matrix does not install or execute
 tslib itself. Runtime behavior tests remain separate from this recovery score.
 
-The current baseline has **87 yes / 24 no / 0 errors across 111 distinct
+The current baseline has **90 yes / 24 no / 0 errors across 114 distinct
 shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
 
 - External private-field helpers remain; mangled inline helpers also remain.
@@ -64,6 +70,7 @@ shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
   factory and parenthesized import-default body are recognized.
 
 The original tslib awaiter regression passes all 18 ES5/ES2015 profiles.
+The mixed producer adds three passing async shapes (raw and both Terser variants).
 Tagged templates and generator delegation now pass across inline, namespace,
 and named-import profiles.
 Fixes should turn their failing shapes into `yes`; regenerate `stats.json`
@@ -78,8 +85,8 @@ These cases belong in focused rule tests or separate compiler reproductions:
   This TypeScript configuration emits CommonJS namespaces or named ESM imports,
   not those exact spellings; relabeling an edited output as tsc output would hide
   its provenance.
-- Mixed SWC/Babel async wrappers containing tslib generator calls, until a
-  concrete multi-stage compiler profile reproduces them.
+- Mixed Babel wrappers and SWC external-helper namespace wrappers. The new
+  mixed profile covers SWC inline async helpers around tslib generators.
 - Shadowed bindings, `with`, wrong helper sources, unsupported state-machine
   shapes, and rollback behavior: these are rule safety boundaries.
 - Bundled tslib provider facts and webpack entry extraction: these need the

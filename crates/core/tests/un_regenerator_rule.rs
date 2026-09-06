@@ -3043,3 +3043,26 @@ function gen() {
         "out-of-range region slot must preserve the wrapper:\n{output}"
     );
 }
+
+#[test]
+fn swc_then_typescript_namespace_generator_restores_async() {
+    let input = include_str!("fixtures/mixed-async/generated.js");
+    let output = apply(input);
+    assert!(output.contains("async function load"), "{output}");
+    assert!(output.contains("await Promise.resolve(value)"), "{output}");
+    assert!(!output.contains("_async_to_generator"), "{output}");
+    assert!(!output.contains("tslib_1.__generator"), "{output}");
+}
+
+#[test]
+fn mixed_generator_namespace_requires_unchanged_binding() {
+    let input = include_str!("fixtures/mixed-async/generated.js");
+    for changed in [
+        input.replace("function load(value)", "function load(value, tslib_1)"),
+        format!("{input}\ntslib_1 = custom;"),
+    ] {
+        let output = apply(&changed);
+        assert!(output.contains("tslib_1.__generator"), "{output}");
+        assert!(!output.contains("async function load"), "{output}");
+    }
+}

@@ -105,7 +105,7 @@ impl VisitMut for AwaiterIifeTransformer<'_> {
 }
 
 #[derive(Default)]
-struct AsyncHelperContext {
+pub(crate) struct AsyncHelperContext {
     tslib_namespaces: HashSet<BindingKey>,
     awaiter_helpers: HashSet<BindingKey>,
     awaiter_namespaces: HashMap<BindingKey, HashSet<String>>,
@@ -128,7 +128,7 @@ struct AsyncHelperContext {
 }
 
 impl AsyncHelperContext {
-    fn from_local_helpers(
+    pub(crate) fn from_local_helpers(
         local_helpers: &LocalHelperContext,
         unresolved_mark: Option<Mark>,
     ) -> Self {
@@ -146,7 +146,7 @@ impl AsyncHelperContext {
         }
     }
 
-    fn record_module_hazards(&mut self, module: &Module) {
+    pub(crate) fn record_module_hazards(&mut self, module: &Module) {
         self.written_bindings =
             crate::analysis::binding_uses::BindingUseIndex::collect_direct_write_bindings(module);
         self.with_statement_present = module_has_with_stmt(module);
@@ -221,6 +221,17 @@ impl AsyncHelperContext {
         else {
             return false;
         };
+        let lookup = match callee {
+            Expr::Ident(id) => Some(id),
+            Expr::Member(member) => match strip_parens(&member.obj) {
+                Expr::Ident(id) => Some(id),
+                _ => None,
+            },
+            _ => None,
+        };
+        if lookup.is_some_and(|id| self.written_bindings.contains(&binding_key(id))) {
+            return false;
+        }
         match callee {
             Expr::Ident(id) => {
                 helpers.contains(&binding_key(id))
@@ -327,22 +338,10 @@ fn contains_unresolved_generator_wrapper(
 
 pub(crate) fn try_transform_ts_generator_body(
     body: &mut FunctionBody,
-    generator_helpers: &[BindingKey],
+    helpers: &AsyncHelperContext,
     reserved_names: &HashSet<Atom>,
 ) -> bool {
-    let helpers = AsyncHelperContext {
-        tslib_namespaces: HashSet::new(),
-        awaiter_helpers: HashSet::new(),
-        awaiter_namespaces: HashMap::new(),
-        generator_helpers: generator_helpers.iter().cloned().collect(),
-        generator_namespaces: HashMap::new(),
-        values_helpers: HashSet::new(),
-        values_namespaces: HashMap::new(),
-        unresolved_mark: None,
-        written_bindings: HashSet::new(),
-        with_statement_present: false,
-    };
-    try_transform_generator(body, &helpers, reserved_names)
+    try_transform_generator(body, helpers, reserved_names)
 }
 
 fn try_transform_generator(
