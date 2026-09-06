@@ -380,7 +380,9 @@ impl IndexedReturnContext {
             return;
         };
         let mut next = 0;
-        if !ordered_index_return(expr, &extraction.ref_binding.id, &mut next) || next != length {
+        if !ordered_index_return(expr, &extraction.ref_binding.id, &mut next, length)
+            || next != length
+        {
             return;
         }
         let ctxt = SyntaxContext::empty().apply_mark(Mark::new());
@@ -434,7 +436,7 @@ impl IndexedReturnContext {
     }
 }
 
-fn ordered_index_return(expr: &Expr, reference: &Ident, next: &mut usize) -> bool {
+fn ordered_index_return(expr: &Expr, reference: &Ident, next: &mut usize, length: usize) -> bool {
     match strip_parens(expr) {
         Expr::Member(member) => {
             if !matches!(member.obj.as_ref(), Expr::Ident(id) if id.to_id() == reference.to_id())
@@ -451,8 +453,15 @@ fn ordered_index_return(expr: &Expr, reference: &Ident, next: &mut usize) -> boo
                 BinaryOp::LogicalAnd | BinaryOp::LogicalOr | BinaryOp::NullishCoalescing
             ) =>
         {
-            ordered_index_return(&binary.left, reference, next)
-                && ordered_index_return(&binary.right, reference, next)
+            ordered_index_return(&binary.left, reference, next, length)
+                && ordered_index_return(&binary.right, reference, next, length)
+        }
+        // Do not move a free-name read, possible TDZ, or coercion between
+        // indexed reads across the new pattern. Suffix leaves stay after all
+        // elements, exactly where they were evaluated in the lowered return.
+        Expr::Ident(_)
+        | Expr::Lit(Lit::Num(_) | Lit::Str(_) | Lit::Bool(_) | Lit::Null(_) | Lit::BigInt(_)) => {
+            *next == length
         }
         _ => false,
     }

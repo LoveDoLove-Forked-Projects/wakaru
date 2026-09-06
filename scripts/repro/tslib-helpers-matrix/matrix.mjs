@@ -30,6 +30,16 @@ const snippets = [
     acceptForms: ["export function read([a, b]) { return a + b; }"],
   },
   {
+    name: "array-read-offset",
+    source: "export function readOffset(items) { const [a, b] = items; return a + b + 1; }",
+    acceptForms: ["export function readOffset([a, b]) { return a + b + 1; }"],
+  },
+  {
+    name: "array-read-suffix",
+    source: "export function readSuffix(items, other) { const [a, b] = items; return a + b + other; }",
+    acceptForms: ["export function readSuffix([a, b], other) { return a + b + other; }"],
+  },
+  {
     name: "array-spread",
     source: "export function spread(items) { return [...items]; }",
   },

@@ -79,7 +79,7 @@ runtime compatibility. The script-only execution harness cannot run these
 modules; no `execute` check is claimed. The matrix does not install or execute
 tslib itself. Runtime behavior tests remain separate from this recovery score.
 
-The current baseline has **138 yes / 0 no / 0 errors across 138 distinct
+The current baseline has **156 yes / 0 no / 0 errors across 156 distinct
 shapes**. All nine inheritance shapes now recover the TypeScript default
 derived constructor and `super.value()` at `standard`, including module-mode
 Terser's lifted inline-helper factory. This uses the documented
@@ -92,7 +92,10 @@ method `.apply` calls remain outside this bounded recovery.
 
 All nine array-read shapes recover complete destructuring, including the six
 compressed returns whose element bindings were inlined into indexed expressions.
-Incomplete or escaped materializations remain covered by negative rule tests.
+Eighteen additional shapes cover a literal or identifier suffix after the
+complete read sequence (`a + b + 1` and `a + b + other`). Identifier/literal
+leaves before or between indexed reads, effectful suffixes, incomplete or
+escaped materializations remain covered by negative rule tests.
 
 The original tslib awaiter regression passes all 18 ES5/ES2015 profiles.
 The mixed producers add six passing async shapes; the standalone SWC external

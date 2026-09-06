@@ -1,9 +1,9 @@
 {
-  "commit": "6cfd9538",
+  "commit": "cf589203",
   "date": "2026-09-06",
   "aggregate": {
-    "yes": 1948,
-    "total": 1996,
+    "yes": 1966,
+    "total": 2014,
     "pct": 97.6
   },
   "matrices": [
@@ -105,10 +105,10 @@
     },
     {
       "name": "tslib-helpers",
-      "yes": 138,
+      "yes": 156,
       "no": 0,
       "error": 0,
-      "total": 138,
+      "total": 156,
       "pct": 100
     }
   ]

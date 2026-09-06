@@ -285,8 +285,12 @@ source index, output binding, or shadowed `Array` remain untouched.
 
 `UnSlicedToArray` removes iterator materialization only together with a
 proven destructuring group. At `standard` and above, an adjacent return made
-only of ordered `temp[0]` through `temp[N - 1]` reads and eager binary operators
+of ordered `temp[0]` through `temp[N - 1]` reads and eager binary operators
 can recover a complete pattern with fresh, collision-free element bindings.
+After all `N` reads, the expression may also contain literal or identifier
+leaves, such as `temp[0] + temp[1] + other`. Such leaves before or between
+element reads remain unsupported: identifiers can throw or access global
+getters, and binary coercions can be observable.
 This path accepts direct two-argument helper calls, not `_maybeArrayLike`
 wrappers that pass a helper as an argument. The return must account for every
 use of the temporary. Consumed bindings must each have one declaration; the

@@ -1210,7 +1210,9 @@ fn incomplete_or_observable_indexed_returns_keep_materialization() {
         "eval('pair'); return pair[0] + pair[1];",
         "with (scope) { return pair[0] + pair[1]; }",
     ] {
-        let input = format!("import {{ __read }} from 'tslib'; function read(items) {{ var pair = __read(items, 2); {body} }}");
+        let input = format!(
+            "import {{ __read }} from 'tslib'; function read(items) {{ var pair = __read(items, 2); {body} }}"
+        );
         assert_eq_normalized(
             &common::render_rule(&input, |_| UnSlicedToArray::new()),
             &input,
@@ -1235,7 +1237,9 @@ fn indexed_return_requires_stable_helper_identity() {
         ("var ts = require('tslib'); var ts = custom;", "ts.__read"),
         ("var h = require('tslib').__read; var h = custom;", "h"),
     ] {
-        let input = format!("{header} function read(items) {{ var pair = {callee}(items, 2); return pair[0] + pair[1]; }}");
+        let input = format!(
+            "{header} function read(items) {{ var pair = {callee}(items, 2); return pair[0] + pair[1]; }}"
+        );
         assert_eq_normalized(
             &common::render_rule(&input, |_| UnSlicedToArray::new()),
             &input,
@@ -1319,4 +1323,42 @@ function read(items) {
         &common::render_rule(input, |_| UnSlicedToArray::new()),
         input,
     );
+}
+
+#[test]
+fn indexed_return_recovers_eager_suffix_leaves_after_all_elements() {
+    for suffix in ["1", "other", "(other * 2)", "'tail'", "null", "true", "1n"] {
+        let input = format!(
+            "import {{ __read }} from 'tslib'; function read(items, other) {{ var pair = __read(items, 2); return pair[0] + pair[1] + {suffix}; }}"
+        );
+        let expected_suffix = suffix.trim_matches(['(', ')']);
+        let expected = format!(
+            "function read(items, other) {{ var [_item, _item2] = items; return _item + _item2 + {expected_suffix}; }}"
+        );
+        assert_eq_normalized(
+            &common::render_rule(&input, |_| UnSlicedToArray::new()),
+            &expected,
+        );
+    }
+}
+
+#[test]
+fn indexed_return_keeps_suffix_effects_and_interleaved_leaves() {
+    for expression in [
+        "pair[0] + other + pair[1]",
+        "pair[0] + 1 + pair[1]",
+        "other + pair[0] + pair[1]",
+        "pair[0] + pair[1] + read()",
+        "pair[0] + pair[1] + obj.value",
+        "pair[0] + pair[1] + (other || fallback)",
+        "pair[0] + pair[1] + pair",
+    ] {
+        let input = format!(
+            "import {{ __read }} from 'tslib'; function read(items, other) {{ var pair = __read(items, 2); return {expression}; }}"
+        );
+        assert_eq_normalized(
+            &common::render_rule(&input, |_| UnSlicedToArray::new()),
+            &input,
+        );
+    }
 }
