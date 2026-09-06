@@ -23,3 +23,11 @@ overridden `.apply` / `.call`, replacement of the parent's prototype, and
 mutation of the child's prototype chain. Minimal must match the lowered input;
 standard must match the native source in these cases. This pins the
 `native_class_inheritance` policy; it does not claim universal equivalence.
+
+The `static-factory/` child directory adds `Child.make(value)` returning
+`new Child(value)` to the same nine compiler/minifier profiles. Its
+`runtime.cjs` checks ordinary, native, null, and overridden-apply parents
+against the same minimal/lowered and standard/native policy. Two additional
+hand-authored cases reassign the outer class variable: the factory must still
+construct the original inner constructor, including when its emitted name
+was different. Run this oracle with the same environment and VM flag as above.

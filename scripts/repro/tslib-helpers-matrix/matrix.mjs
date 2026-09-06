@@ -48,6 +48,10 @@ const snippets = [
     source: "export class Child extends Parent { value() { return super.value() + 1; } }",
   },
   {
+    name: "class-static-factory",
+    source: "export class Child extends Parent { static make(value) { return new Child(value); } }",
+  },
+  {
     name: "for-of-values",
     source: "export function visit(items) { for (const item of items) { consume(item); } }",
   },

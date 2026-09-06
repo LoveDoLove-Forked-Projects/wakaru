@@ -1246,6 +1246,7 @@ fn try_iife_to_class(
                 body_stmts,
                 &base.id,
                 inner_ctor_ident,
+                class_name,
                 ts_extends_helpers,
                 tslib_namespaces,
                 uses,
@@ -1669,6 +1670,7 @@ fn recover_ts_default_inheritance(
     original: &[Stmt],
     base: &Ident,
     constructor: &Ident,
+    class_name: &Ident,
     helpers: &HashSet<BindingKey>,
     namespaces: &HashSet<BindingKey>,
     uses: &BindingUseIndex,
@@ -1678,7 +1680,7 @@ fn recover_ts_default_inheritance(
         || uses.has_direct_write(&base.to_id())
         || !uses.has_single_declaration(&constructor.to_id())
         || uses.has_direct_write(&constructor.to_id())
-        || class_members_reference_binding(members, &constructor.sym, constructor.ctxt)
+        || !ts_static_factories_can_rebind(members, constructor, class_name)
     {
         return;
     }
@@ -1730,6 +1732,33 @@ fn recover_ts_default_inheritance(
     members.remove(*position);
     for member in members {
         if let ClassMember::Method(method) = member {
+            if super::helper_matcher::count_binding_refs(&method.function, &constructor.to_id()) > 0
+            {
+                // The proof below allows exactly one reference: this static
+                // factory's direct `new C(...)` callee. Rename by resolver
+                // identity, then attach it to the recovered class binding.
+                let body = method.function.body.as_mut().unwrap();
+                let Stmt::Return(statement) = &mut body.stmts[0] else {
+                    unreachable!()
+                };
+                super::rename_utils::rename_bindings(
+                    statement,
+                    &[super::rename_utils::BindingRename {
+                        old: constructor.to_id(),
+                        new: class_name.sym.clone(),
+                    }],
+                );
+                let Expr::New(expr) =
+                    crate::utils::paren::strip_parens_mut(statement.arg.as_mut().unwrap())
+                else {
+                    unreachable!()
+                };
+                let Expr::Ident(id) = crate::utils::paren::strip_parens_mut(&mut expr.callee)
+                else {
+                    unreachable!()
+                };
+                id.ctxt = class_name.ctxt;
+            }
             if let Some(body) = &mut method.function.body {
                 body.visit_mut_with(&mut TsSuperMethodCalls {
                     base,
@@ -1739,6 +1768,55 @@ fn recover_ts_default_inheritance(
         }
     }
     // The caller's capture check rejects any superclass use not consumed here.
+}
+
+fn ts_static_factories_can_rebind(
+    members: &[ClassMember],
+    constructor: &Ident,
+    class_name: &Ident,
+) -> bool {
+    // The generated class's self name would capture reads that originally
+    // targeted the enclosing variable, including after its reassignment.
+    if class_members_reference_binding(members, &class_name.sym, class_name.ctxt) {
+        return false;
+    }
+    for member in members {
+        let refs = super::helper_matcher::count_binding_refs(member, &constructor.to_id());
+        if refs == 0 {
+            continue;
+        }
+        let ClassMember::Method(method) = member else {
+            return false;
+        };
+        if refs != 1
+            || !method.is_static
+            || method.kind != MethodKind::Method
+            || method.function.is_async
+            || method.function.is_generator
+        {
+            return false;
+        }
+        if method.function.params.iter().any(|param| {
+            let bindings: Vec<BindingKey> = find_pat_ids(&param.pat);
+            bindings.iter().any(|(name, _)| *name == class_name.sym)
+        }) {
+            return false;
+        }
+        let Some(body) = &method.function.body else {
+            return false;
+        };
+        let [Stmt::Return(statement)] = body.stmts.as_slice() else {
+            return false;
+        };
+        let Some(Expr::New(expr)) = statement.arg.as_deref().map(strip_parens) else {
+            return false;
+        };
+        if !matches!(strip_parens(&expr.callee), Expr::Ident(id) if id.to_id() == constructor.to_id())
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn is_ts_default_derived_constructor(function: &Function, base: &Ident) -> bool {

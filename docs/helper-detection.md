@@ -348,7 +348,14 @@ Superclass method calls require `this` as their first non-spread argument and
 a static method name. Lexical arrows share the method's `super`; ordinary
 nested functions and classes do not. Remaining superclass captures, references
 to the removed inner constructor binding, custom constructor bodies, `.apply`
-method calls and dynamic method names retain the wrapper. This is not general
+method calls and dynamic method names retain the wrapper. The constructor
+reference exception is a static, synchronous method with exactly one statement:
+`return new C(...)`. Its sole reference to the original constructor is rebound
+to the recovered class using resolver identity. A differently named outer
+binding is supported only when the new name cannot collide with method
+parameters; reads of the enclosing class variable also prevent recovery.
+Deferred factories, constructor writes, and other inner-constructor uses remain
+unsupported. This is not general
 superclass recovery. Real TypeScript 5.9.3 and Terser 5.51.2 outputs are checked
 in under `tests/fixtures/tslib-inheritance/`. The compressed variants use the
 same module-mode Terser settings as the matrix. If compression lifts the

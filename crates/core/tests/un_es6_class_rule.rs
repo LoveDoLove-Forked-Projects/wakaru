@@ -2564,6 +2564,104 @@ fn extends_import_cleanup_preserves_remaining_or_originally_unused_bindings() {
 }
 
 #[test]
+fn ts_default_inheritance_recovers_static_factories_for_the_original_constructor() {
+    for inner in ["Child", "C"] {
+        let input =
+            ts_default_inheritance("Child.make = function (value) { return new Child(value); };");
+        let input = if inner == "C" {
+            input
+                .replace("Child", "C")
+                .replace("var C =", "var Child =")
+        } else {
+            input
+        };
+        assert_eq_normalized(
+            &apply(&input),
+            "import \"tslib\"; class Child extends Parent { static make(value) { return new Child(value); } }",
+        );
+    }
+}
+
+#[test]
+fn ts_static_factory_keeps_name_capture_outer_reads_and_constructor_writes() {
+    for method in [
+        "C.make = function (Child) { return new C(Child); };",
+        "C.make = function () { return new C(Child); };",
+        "C.make = function () { return new C(C); };",
+        "C.make = function () { C = other; return new C(); };",
+        "C.make = function () { return C(); };",
+        "C.make = function () { return () => new C(); };",
+    ] {
+        let input = ts_default_inheritance(method)
+            .replace("__extends(Child, base)", "__extends(C, base)")
+            .replace("function Child()", "function C()")
+            .replace("return Child;", "return C;");
+        assert!(
+            !apply(&input).contains("class Child extends"),
+            "{}",
+            apply(&input)
+        );
+    }
+}
+
+#[test]
+fn ts_static_factory_does_not_rewrite_a_shadowed_constructor_parameter() {
+    let input = ts_default_inheritance("Child.make = function (Child) { return new Child(); };");
+    assert_eq_normalized(
+        &apply(&input),
+        "import \"tslib\"; class Child extends Parent { static make(Child) { return new Child(); } }",
+    );
+}
+
+#[test]
+fn ts_static_factory_rebinds_parenthesized_constructor_callees() {
+    let input =
+        ts_default_inheritance("Child.make = function (value) { return new (Child)(value); };")
+            .replace("Child", "C")
+            .replace("var C =", "var Child =");
+    assert_eq_normalized(
+        &apply(&input),
+        "import \"tslib\"; class Child extends Parent { static make(value) { return new Child(value); } }",
+    );
+}
+
+#[test]
+fn tsc_static_factories_recover_across_helper_delivery_and_minification() {
+    for input in [
+        include_str!("fixtures/tslib-inheritance/static-factory/commonjs-inline.js"),
+        include_str!("fixtures/tslib-inheritance/static-factory/commonjs-inline-compressed.js"),
+        include_str!("fixtures/tslib-inheritance/static-factory/commonjs-inline-mangled.js"),
+        include_str!("fixtures/tslib-inheritance/static-factory/commonjs-import-helpers.js"),
+        include_str!(
+            "fixtures/tslib-inheritance/static-factory/commonjs-import-helpers-compressed.js"
+        ),
+        include_str!(
+            "fixtures/tslib-inheritance/static-factory/commonjs-import-helpers-mangled.js"
+        ),
+        include_str!("fixtures/tslib-inheritance/static-factory/esm-import-helpers.js"),
+        include_str!("fixtures/tslib-inheritance/static-factory/esm-import-helpers-compressed.js"),
+        include_str!("fixtures/tslib-inheritance/static-factory/esm-import-helpers-mangled.js"),
+    ] {
+        let output = render(input);
+        assert!(output.contains("class Child extends Parent"), "{output}");
+        assert!(output.contains("static make("), "{output}");
+        assert!(output.contains("return new Child("), "{output}");
+        assert!(!output.contains("__extends"), "{output}");
+        let minimal = wakaru_core::decompile(
+            input,
+            DecompileOptions {
+                level: RewriteLevel::Minimal,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .code;
+        assert!(!minimal.contains("class Child"), "{minimal}");
+        assert!(minimal.contains(".apply(this, arguments)"), "{minimal}");
+    }
+}
+
+#[test]
 fn extends_import_cleanup_respects_dynamic_lookup_and_binding_identity() {
     let input = ts_default_inheritance("") + "function inspect() { return eval(' __extends '); }";
     assert!(apply(&input).contains("import { __extends }"));
