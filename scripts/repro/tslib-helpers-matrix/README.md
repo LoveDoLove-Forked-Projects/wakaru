@@ -79,11 +79,16 @@ runtime compatibility. The script-only execution harness cannot run these
 modules; no `execute` check is claimed. The matrix does not install or execute
 tslib itself. Runtime behavior tests remain separate from this recovery score.
 
-The current baseline has **129 yes / 9 no / 0 errors across 138 distinct
-shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
-
-- Inheritance recovery retains its IIFE when members still capture the
-  superclass parameter; full superclass recovery remains incomplete.
+The current baseline has **138 yes / 0 no / 0 errors across 138 distinct
+shapes**. All nine inheritance shapes now recover the TypeScript default
+derived constructor and `super.value()` at `standard`, including module-mode
+Terser's lifted inline-helper factory. This uses the documented
+[`native_class_inheritance`](../../../docs/rewrite-assumptions.md#native_class_inheritance)
+source-recovery policy; `minimal` retains the lowered form. The separate
+[fixture runtime oracle](../../../crates/core/tests/fixtures/tslib-inheritance/README.md)
+checks ordinary parents and the intentional native-versus-helper differences.
+Custom constructors, unconsumed wrapper captures, dynamic method names and
+method `.apply` calls remain outside this bounded recovery.
 
 All nine array-read shapes recover complete destructuring, including the six
 compressed returns whose element bindings were inlined into indexed expressions.

@@ -1,15 +1,18 @@
 use std::collections::HashSet;
+use std::rc::Rc;
+
+use crate::analysis::binding_uses::BindingUseIndex;
 
 use swc_core::atoms::Atom;
 use swc_core::common::util::take::Take;
 use swc_core::common::{Mark, Span, SyntaxContext, DUMMY_SP};
 use swc_core::ecma::ast::{
-    ArrowExpr, ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BindingIdent, CallExpr,
-    Callee, Class, ClassDecl, ClassMember, ClassMethod, ClassProp, ComputedPropName, Constructor,
-    Decl, ExportDecl, Expr, ExprOrSpread, ExprStmt, FnExpr, Function, FunctionBody, Ident,
-    IdentName, ImportSpecifier, Lit, MemberExpr, MemberProp, MethodKind, ModuleDecl,
+    ArrowExpr, ArrowFunctionBody, AssignExpr, AssignOp, AssignTarget, BinaryOp, BindingIdent,
+    CallExpr, Callee, Class, ClassDecl, ClassMember, ClassMethod, ClassProp, ComputedPropName,
+    Constructor, Decl, ExportDecl, Expr, ExprOrSpread, ExprStmt, FnExpr, Function, FunctionBody,
+    Ident, IdentName, ImportSpecifier, Lit, MemberExpr, MemberProp, MethodKind, ModuleDecl,
     ModuleExportName, ModuleItem, Param, ParamOrTsParamProp, Pat, PropName, SeqExpr,
-    SimpleAssignTarget, Stmt, VarDecl,
+    SimpleAssignTarget, Stmt, Super, SuperProp, SuperPropExpr, VarDecl,
 };
 use swc_core::ecma::utils::find_pat_ids;
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
@@ -72,6 +75,9 @@ impl VisitMut for UnEs6Class {
         });
         let mut inner =
             UnEs6ClassInner::new(helper_context, self.unresolved_mark, self.rewrite_level);
+        if inner.can_index_ts_inheritance() && !has_inheritance_dynamic_scope(items) {
+            inner.inheritance_uses = Some(Rc::new(BindingUseIndex::collect_module_items(items)));
+        }
         items.visit_mut_with(&mut inner);
     }
 
@@ -80,6 +86,9 @@ impl VisitMut for UnEs6Class {
         let helper_context = Es6ClassHelperContext::from_stmts(stmts, self.unresolved_mark);
         let mut inner =
             UnEs6ClassInner::new(helper_context, self.unresolved_mark, self.rewrite_level);
+        if inner.can_index_ts_inheritance() && !has_inheritance_dynamic_scope(stmts) {
+            inner.inheritance_uses = Some(Rc::new(BindingUseIndex::collect_stmts(stmts)));
+        }
         stmts.visit_mut_with(&mut inner);
     }
 }
@@ -192,11 +201,18 @@ impl Es6ClassHelperContext {
 struct UnEs6ClassInner {
     helpers: Es6ClassHelperContext,
     reused_var_bindings: HashSet<BindingKey>,
+    inheritance_uses: Option<Rc<BindingUseIndex>>,
     unresolved_mark: Mark,
     rewrite_level: RewriteLevel,
 }
 
 impl UnEs6ClassInner {
+    fn can_index_ts_inheritance(&self) -> bool {
+        self.rewrite_level >= RewriteLevel::Standard
+            && (!self.helpers.ts_extends_helpers.is_empty()
+                || !self.helpers.tslib_namespaces.is_empty())
+    }
+
     fn new(
         helper_context: Es6ClassHelperContext,
         unresolved_mark: Mark,
@@ -205,10 +221,34 @@ impl UnEs6ClassInner {
         Self {
             helpers: helper_context,
             reused_var_bindings: HashSet::new(),
+            inheritance_uses: None,
             unresolved_mark,
             rewrite_level,
         }
     }
+}
+
+#[derive(Default)]
+struct InheritanceDynamicScope {
+    found: bool,
+}
+
+impl Visit for InheritanceDynamicScope {
+    fn visit_with_stmt(&mut self, _: &swc_core::ecma::ast::WithStmt) {
+        self.found = true;
+    }
+    fn visit_call_expr(&mut self, call: &CallExpr) {
+        if super::eval_utils::is_direct_eval_call(call) {
+            self.found = true;
+        }
+        call.visit_children_with(self);
+    }
+}
+
+fn has_inheritance_dynamic_scope<T: VisitWith<InheritanceDynamicScope> + ?Sized>(node: &T) -> bool {
+    let mut scan = InheritanceDynamicScope::default();
+    node.visit_with(&mut scan);
+    scan.found
 }
 
 #[derive(Default)]
@@ -261,6 +301,7 @@ impl VisitMut for UnEs6ClassInner {
         let mut scoped_inner =
             UnEs6ClassInner::new(scope_helpers, self.unresolved_mark, self.rewrite_level);
         scoped_inner.reused_var_bindings = reused_var_bindings;
+        scoped_inner.inheritance_uses = self.inheritance_uses.clone();
         stmts.visit_mut_children_with(&mut scoped_inner);
 
         let mut converted_any = false;
@@ -275,6 +316,8 @@ impl VisitMut for UnEs6ClassInner {
                         &scoped_inner.helpers.tslib_namespaces,
                         &scoped_inner.helpers.create_class_helpers,
                         &scoped_inner.helpers.call_super_helpers,
+                        &scoped_inner.helpers.ts_extends_helpers,
+                        scoped_inner.inheritance_uses.as_deref(),
                         self.unresolved_mark,
                         self.rewrite_level,
                         var_decl.span,
@@ -321,6 +364,8 @@ impl VisitMut for UnEs6ClassInner {
                         &self.helpers.tslib_namespaces,
                         &self.helpers.create_class_helpers,
                         &self.helpers.call_super_helpers,
+                        &self.helpers.ts_extends_helpers,
+                        self.inheritance_uses.as_deref(),
                         self.unresolved_mark,
                         self.rewrite_level,
                         var_decl.span,
@@ -342,6 +387,8 @@ impl VisitMut for UnEs6ClassInner {
                         &self.helpers.tslib_namespaces,
                         &self.helpers.create_class_helpers,
                         &self.helpers.call_super_helpers,
+                        &self.helpers.ts_extends_helpers,
+                        self.inheritance_uses.as_deref(),
                         self.unresolved_mark,
                         self.rewrite_level,
                         var_decl.span,
@@ -544,17 +591,7 @@ fn is_tslib_extends_member(
 }
 
 fn is_ts_extends_helper_init(expr: &Expr) -> bool {
-    let Expr::Bin(or_expr) = strip_parens(expr) else {
-        return false;
-    };
-    if or_expr.op != swc_core::ecma::ast::BinaryOp::LogicalOr {
-        return false;
-    }
-    if !is_this_helper_member(&or_expr.left, "__extends") {
-        return false;
-    }
-    let rhs = strip_parens(&or_expr.right);
-    extract_iife_call(rhs).is_some() || matches!(rhs, Expr::Fn(_) | Expr::Arrow(_))
+    super::transpiler_helper_utils::ts_expr_matches_helper_kind(expr, TsHelperKind::Extends)
 }
 
 fn is_this_helper_member(expr: &Expr, helper_name: &str) -> bool {
@@ -945,7 +982,12 @@ fn ts_extends_helper_decl_key(var_decl: &VarDecl) -> Option<BindingKey> {
     let Pat::Ident(binding) = &decl.name else {
         return None;
     };
-    if !decl.init.as_deref().is_some_and(is_ts_extends_helper_init) {
+    // Selection is still gated by the proven helper set. Include the lifted
+    // factory sequence here only for cleanup, never for name-only detection.
+    let Expr::Bin(or_expr) = strip_parens(decl.init.as_deref()?) else {
+        return None;
+    };
+    if or_expr.op != BinaryOp::LogicalOr || !is_this_helper_member(&or_expr.left, "__extends") {
         return None;
     }
     Some(binding_key(&binding.id))
@@ -1051,6 +1093,8 @@ fn try_iife_to_class(
     tslib_namespaces: &HashSet<BindingKey>,
     create_class_helpers: &HashSet<BindingKey>,
     call_super_helpers: &HashSet<BindingKey>,
+    ts_extends_helpers: &HashSet<BindingKey>,
+    inheritance_uses: Option<&BindingUseIndex>,
     unresolved_mark: Mark,
     rewrite_level: RewriteLevel,
     original_span: Span,
@@ -1132,7 +1176,7 @@ fn try_iife_to_class(
 
     let inner_ctor_ident = find_inner_constructor_ident(body_stmts)?;
     let inner_ctor_name = inner_ctor_ident.sym.as_ref();
-    let class_body = parse_class_body(
+    let mut class_body = parse_class_body(
         body_stmts,
         &class_name.sym,
         inner_param.as_deref(),
@@ -1144,6 +1188,28 @@ fn try_iife_to_class(
         rewrite_level >= RewriteLevel::Standard,
         unresolved_mark,
     )?;
+    // native_class_inheritance: only the proven TypeScript default-constructor
+    // frame can consume its null guard and recover native super dispatch.
+    if rewrite_level >= RewriteLevel::Standard
+        && call.args.len() == 1
+        && call.args[0].spread.is_none()
+        && matches!(callee_inner, Expr::Fn(function) if function.ident.is_none()
+            && !function.function.is_async && !function.function.is_generator)
+    {
+        if let (Some(Pat::Ident(base)), Some(uses)) =
+            (param_pats.first().copied(), inheritance_uses)
+        {
+            recover_ts_default_inheritance(
+                &mut class_body,
+                body_stmts,
+                &base.id,
+                inner_ctor_ident,
+                ts_extends_helpers,
+                tslib_namespaces,
+                uses,
+            );
+        }
+    }
     // Removing the IIFE also removes its parameter bindings. Constructor
     // rewriting can consume some superclass uses while leaving guards or
     // method closures that still capture the parameter. Preserve that scope
@@ -1551,6 +1617,200 @@ fn parse_class_body(
 
     let _ = class_name; // used only for documentation purposes
     Some(members)
+}
+
+/// This is a source-recovery policy, not a proof that `.apply` and native
+/// construction have identical behavior for null or native-class parents.
+#[allow(clippy::too_many_arguments)]
+fn recover_ts_default_inheritance(
+    members: &mut Vec<ClassMember>,
+    original: &[Stmt],
+    base: &Ident,
+    constructor: &Ident,
+    helpers: &HashSet<BindingKey>,
+    namespaces: &HashSet<BindingKey>,
+    uses: &BindingUseIndex,
+) {
+    if base.sym == "arguments"
+        || !uses.has_single_declaration(&base.to_id())
+        || uses.has_direct_write(&base.to_id())
+        || !uses.has_single_declaration(&constructor.to_id())
+        || uses.has_direct_write(&constructor.to_id())
+        || class_members_reference_binding(members, &constructor.sym, constructor.ctxt)
+    {
+        return;
+    }
+    let constructors: Vec<_> = original
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::Decl(Decl::Fn(function)) => Some(function),
+            _ => None,
+        })
+        .collect();
+    let [function] = constructors.as_slice() else {
+        return;
+    };
+    if function.ident.to_id() != constructor.to_id()
+        || !is_ts_default_derived_constructor(&function.function, base)
+    {
+        return;
+    }
+    let extends_calls = original.iter().filter(|stmt| {
+        let Stmt::Expr(statement) = stmt else { return false; };
+        let Expr::Call(call) = strip_parens(&statement.expr) else { return false; };
+        if call.args.len() != 2 || call.args.iter().any(|arg| arg.spread.is_some())
+            || !matches!(strip_parens(&call.args[0].expr), Expr::Ident(id) if id.to_id() == constructor.to_id())
+            || !matches!(strip_parens(&call.args[1].expr), Expr::Ident(id) if id.to_id() == base.to_id())
+        { return false; }
+        let Callee::Expr(callee) = &call.callee else { return false; };
+        match strip_parens(callee) {
+            Expr::Ident(id) => helpers.contains(&id.to_id())
+                && uses.has_single_declaration(&id.to_id()) && !uses.has_direct_write(&id.to_id()),
+            Expr::Member(member) if matches!(&member.prop, MemberProp::Ident(name) if name.sym == "__extends") =>
+                matches!(strip_parens(&member.obj), Expr::Ident(id) if namespaces.contains(&id.to_id())
+                    && uses.has_single_declaration(&id.to_id()) && uses.has_only_static_member_reads_any(&id.to_id())),
+            _ => false,
+        }
+    }).count();
+    if extends_calls != 1 {
+        return;
+    }
+    let positions: Vec<_> = members
+        .iter()
+        .enumerate()
+        .filter_map(|(index, member)| {
+            matches!(member, ClassMember::Constructor(_)).then_some(index)
+        })
+        .collect();
+    let [position] = positions.as_slice() else {
+        return;
+    };
+    members.remove(*position);
+    for member in members {
+        if let ClassMember::Method(method) = member {
+            if let Some(body) = &mut method.function.body {
+                body.visit_mut_with(&mut TsSuperMethodCalls {
+                    base,
+                    is_static: method.is_static,
+                });
+            }
+        }
+    }
+    // The caller's capture check rejects any superclass use not consumed here.
+}
+
+fn is_ts_default_derived_constructor(function: &Function, base: &Ident) -> bool {
+    if !function.params.is_empty() || function.is_async || function.is_generator {
+        return false;
+    }
+    let Some(body) = &function.body else {
+        return false;
+    };
+    let [Stmt::Return(statement)] = body.stmts.as_slice() else {
+        return false;
+    };
+    let Some(Expr::Bin(fallback)) = statement.arg.as_deref().map(strip_parens) else {
+        return false;
+    };
+    if fallback.op != BinaryOp::LogicalOr || !matches!(strip_parens(&fallback.right), Expr::This(_))
+    {
+        return false;
+    }
+    let Expr::Bin(guarded) = strip_parens(&fallback.left) else {
+        return false;
+    };
+    if guarded.op != BinaryOp::LogicalAnd {
+        return false;
+    }
+    let Expr::Bin(guard) = strip_parens(&guarded.left) else {
+        return false;
+    };
+    if guard.op != BinaryOp::NotEqEq {
+        return false;
+    }
+    let is_base =
+        |expr: &Expr| matches!(strip_parens(expr), Expr::Ident(id) if id.to_id() == base.to_id());
+    let is_null = |expr: &Expr| matches!(strip_parens(expr), Expr::Lit(Lit::Null(_)));
+    if !((is_base(&guard.left) && is_null(&guard.right))
+        || (is_null(&guard.left) && is_base(&guard.right)))
+    {
+        return false;
+    }
+    let Expr::Call(call) = strip_parens(&guarded.right) else {
+        return false;
+    };
+    if call.args.len() != 2
+        || call.args.iter().any(|arg| arg.spread.is_some())
+        || !matches!(strip_parens(&call.args[0].expr), Expr::This(_))
+        || !matches!(strip_parens(&call.args[1].expr), Expr::Ident(id) if id.sym == "arguments")
+    {
+        return false;
+    }
+    matches!(&call.callee, Callee::Expr(callee) if matches!(strip_parens(callee), Expr::Member(member)
+        if is_base(&member.obj) && matches!(&member.prop, MemberProp::Ident(name) if name.sym == "apply")))
+}
+
+struct TsSuperMethodCalls<'a> {
+    base: &'a Ident,
+    is_static: bool,
+}
+
+impl VisitMut for TsSuperMethodCalls<'_> {
+    fn visit_mut_call_expr(&mut self, call: &mut CallExpr) {
+        call.visit_mut_children_with(self);
+        let Some(receiver) = call.args.first() else {
+            return;
+        };
+        if receiver.spread.is_some() || !matches!(strip_parens(&receiver.expr), Expr::This(_)) {
+            return;
+        }
+        let Callee::Expr(callee) = &call.callee else {
+            return;
+        };
+        let Expr::Member(invocation) = strip_parens(callee) else {
+            return;
+        };
+        if !matches!(&invocation.prop, MemberProp::Ident(name) if name.sym == "call") {
+            return;
+        }
+        let Expr::Member(target) = strip_parens(&invocation.obj) else {
+            return;
+        };
+        let base_object = if self.is_static {
+            strip_parens(&target.obj)
+        } else {
+            let Expr::Member(prototype) = strip_parens(&target.obj) else {
+                return;
+            };
+            if !matches!(&prototype.prop, MemberProp::Ident(name) if name.sym == "prototype") {
+                return;
+            }
+            strip_parens(&prototype.obj)
+        };
+        if !matches!(base_object, Expr::Ident(id) if id.to_id() == self.base.to_id()) {
+            return;
+        }
+        let prop = match &target.prop {
+            MemberProp::Ident(name) => SuperProp::Ident(name.clone()),
+            MemberProp::Computed(computed)
+                if matches!(strip_parens(&computed.expr), Expr::Lit(Lit::Str(_))) =>
+            {
+                SuperProp::Computed(computed.clone())
+            }
+            _ => return,
+        };
+        call.callee = Callee::Expr(Box::new(Expr::SuperProp(SuperPropExpr {
+            span: call.span,
+            obj: Super { span: DUMMY_SP },
+            prop,
+        })));
+        call.args.remove(0);
+    }
+
+    // Arrows inherit the method's this and super. Ordinary functions, object
+    // methods and nested classes do not share that lexical method context.
+    fn visit_mut_function(&mut self, _: &mut Function) {}
+    fn visit_mut_class(&mut self, _: &mut Class) {}
 }
 
 fn class_member_has_invalid_signature(member: &ClassMember) -> bool {

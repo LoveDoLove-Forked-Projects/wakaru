@@ -2309,9 +2309,9 @@ consume(Shared);
 }
 
 #[test]
-fn typescript_inheritance_keeps_the_superclass_parameter_scope() {
+fn typescript_default_inheritance_recovers_native_super_dispatch() {
     // TypeScript 5.9.3, ES5 + CommonJS + importHelpers. The constructor's
-    // null guard and the method's prototype call still depend on _super.
+    // canonical default constructor and prototype call recover together at standard.
     let input = r#"
 var tslib_1 = require("tslib");
 var Child = (function (_super) {
@@ -2327,12 +2327,16 @@ var Child = (function (_super) {
 exports.Child = Child;
 "#;
     let output = apply(input);
-    assert!(output.contains("function(_super)"), "{output}");
+    assert!(output.contains("class Child extends Parent"), "{output}");
+    assert!(output.contains("super.value() + 1"), "{output}");
+    assert!(!output.contains("function(_super)"), "{output}");
+    let minimal = apply_minimal(input);
+    assert!(minimal.contains("_super !== null"), "{minimal}");
     assert!(
-        output.contains("tslib_1.__extends(Child, _super)"),
-        "{output}"
+        minimal.contains("tslib_1.__extends(Child, _super)"),
+        "{minimal}"
     );
-    assert!(!output.contains("class Child extends Parent"), "{output}");
+    assert!(!minimal.contains("class Child extends"), "{minimal}");
 }
 
 #[test]
@@ -2352,4 +2356,157 @@ var Child = (function (base) {
     assert!(output.contains("function(base)"), "{output}");
     assert!(output.contains("return base"), "{output}");
     assert!(!output.contains("class Child extends Parent"), "{output}");
+}
+
+fn ts_default_inheritance(method: &str) -> String {
+    format!(
+        r#"import {{ __extends }} from "tslib";
+var Child = (function (base) {{
+    __extends(Child, base);
+    function Child() {{ return base !== null && base.apply(this, arguments) || this; }}
+    {method}
+    return Child;
+}})(Parent);"#
+    )
+}
+
+#[test]
+fn ts_default_inheritance_rewrites_instance_static_and_lexical_arrow_calls() {
+    let input = ts_default_inheritance(
+        r#"
+Child.prototype.value = function (arg) { return base.prototype.value.call(this, arg); };
+Child.value = function (arg) { return base.value.call(this, arg); };
+Child.prototype.lazy = function () { return () => base.prototype.value.call(this); };
+"#,
+    );
+    let expected = r#"import { __extends } from "tslib";
+class Child extends Parent {
+    value(arg) { return super.value(arg); }
+    static value(arg) { return super.value(arg); }
+    lazy() { return () => super.value(); }
+}"#;
+    assert_eq_normalized(&apply(&input), expected);
+}
+
+#[test]
+fn ts_default_inheritance_keeps_noncanonical_constructor_frames() {
+    let input = ts_default_inheritance("");
+    for source in [
+        input.replace("base !== null", "base != null"),
+        input.replace("base !== null", "base !== undefined"),
+        input.replace("this, arguments", "other, arguments"),
+        input.replace("this, arguments", "this, values"),
+        input.replace("this, arguments", "this, ...arguments"),
+        input.replace("function Child()", "function Child(arguments)"),
+        input.replace("return base !==", "observe(); return base !=="),
+        input.replace("|| this", "|| fallback"),
+        input.replace("function (base)", "async function (base)"),
+        input.replace("})(Parent)", "})(...parents)"),
+    ] {
+        assert!(
+            !apply(&source).contains("class Child extends"),
+            "{}",
+            apply(&source)
+        );
+    }
+}
+
+#[test]
+fn ts_default_inheritance_requires_stable_proven_extends_helpers() {
+    let input = ts_default_inheritance("");
+    for prefix in [
+        "function __extends(a, b) { custom(a, b); }",
+        "var __extends = this && this.__extends || function(a, b) { custom(a, b); };",
+        "",
+        "var __extends = require('tslib').__extends; __extends = custom;",
+        "var __extends = require('tslib').__extends; var __extends = custom;",
+        "var __extends = require('tslib').__extends; function replace() { __extends = custom; }",
+    ] {
+        let source = input.replace("import { __extends } from \"tslib\";", prefix);
+        assert!(
+            !apply(&source).contains("class Child extends"),
+            "{}",
+            apply(&source)
+        );
+    }
+    for effect in [
+        "ts.__extends = custom;",
+        "ts = custom;",
+        "var ts = custom;",
+        "consume(ts);",
+        "eval(code);",
+        "with (scope) { observe(); }",
+    ] {
+        let source = input
+            .replace(
+                "import { __extends } from \"tslib\";",
+                &format!("var ts = require('tslib'); {effect}"),
+            )
+            .replace("__extends(Child, base)", "ts.__extends(Child, base)");
+        assert!(
+            !apply(&source).contains("class Child extends"),
+            "{}",
+            apply(&source)
+        );
+    }
+}
+
+#[test]
+fn ts_default_inheritance_preserves_unconsumed_and_dynamic_superclass_uses() {
+    for method in [
+        "Child.prototype.value = function () { return base; };",
+        "Child.prototype.value = function () { Child = custom; return base.prototype.value.call(this); };",
+        "Child.prototype.value = function () { return Child; };",
+        "Child.prototype.value = function () { return function () { return base.prototype.value.call(this); }; };",
+        "Child.prototype.value = function () { return base.prototype.value.call(other); };",
+        "Child.prototype.value = function () { return base.prototype[key()].call(this); };",
+        "Child.prototype.value = function () { base = custom; return base.prototype.value.call(this); };",
+        "Child.prototype.value = function () { return base.prototype.value.apply(this, arguments); };",
+        "Child.prototype.value = function () { return base.value.call(this); };",
+        "Child.value = function () { return base.prototype.value.call(this); };",
+    ] {
+        let input = ts_default_inheritance(method);
+        assert!(!apply(&input).contains("class Child extends"), "{}", apply(&input));
+    }
+}
+
+#[test]
+fn ts_default_inheritance_does_not_rewrite_a_shadowed_superclass_name() {
+    let input = ts_default_inheritance(
+        "Child.prototype.value = function (base) { return base.prototype.value.call(this); };",
+    );
+    let expected = r#"import { __extends } from "tslib";
+class Child extends Parent { value(base) { return base.prototype.value.call(this); } }"#;
+    assert_eq_normalized(&apply(&input), expected);
+}
+
+#[test]
+fn tsc_default_inheritance_recovers_across_helper_delivery_and_minification() {
+    for input in [
+        include_str!("fixtures/tslib-inheritance/commonjs-inline.js"),
+        include_str!("fixtures/tslib-inheritance/commonjs-inline-compressed.js"),
+        include_str!("fixtures/tslib-inheritance/commonjs-inline-mangled.js"),
+        include_str!("fixtures/tslib-inheritance/commonjs-import-helpers.js"),
+        include_str!("fixtures/tslib-inheritance/commonjs-import-helpers-compressed.js"),
+        include_str!("fixtures/tslib-inheritance/commonjs-import-helpers-mangled.js"),
+        include_str!("fixtures/tslib-inheritance/esm-import-helpers.js"),
+        include_str!("fixtures/tslib-inheritance/esm-import-helpers-compressed.js"),
+        include_str!("fixtures/tslib-inheritance/esm-import-helpers-mangled.js"),
+    ] {
+        let output = render(input);
+        assert!(output.contains("class Child extends Parent"), "{output}");
+        assert!(output.contains("super.value() + 1"), "{output}");
+        assert!(!output.contains(".apply(this, arguments)"), "{output}");
+        let minimal = wakaru_core::decompile(
+            input,
+            DecompileOptions {
+                level: RewriteLevel::Minimal,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .code;
+        assert!(!minimal.contains("class Child"), "{minimal}");
+        assert!(minimal.contains(".apply(this, arguments)"), "{minimal}");
+    }
 }

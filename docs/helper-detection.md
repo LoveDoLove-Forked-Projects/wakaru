@@ -322,6 +322,46 @@ so it consumes exactly the helper's requested number of iterator values.
 Conditional/deferred access, `arguments`, direct `eval`, `with`, and minimal
 rewrite mode all preserve the lowered form.
 
+### TypeScript default inheritance
+
+`UnEs6Class` can consume the canonical `base !== null &&
+base.apply(this, arguments) || this` default constructor at `standard` and
+above, then recover `base.prototype.method.call(this, ...)` and static
+`base.method.call(this, ...)` as native `super` calls. The source-recovery
+tradeoff is named
+[`native_class_inheritance`](rewrite-assumptions.md#native_class_inheritance).
+
+The anonymous, synchronous wrapper must have one ordinary superclass argument.
+The extends call must use the exact resolved constructor and wrapper parameter,
+with a proven TypeScript helper or a tslib namespace. Helper aliases,
+namespaces, the superclass parameter and the constructor require single,
+stable declarations; namespaces must have only static member reads. Direct
+`eval` or `with` disables this new path. The module's use index is shared with
+nested visitors so writes outside the immediate wrapper still disqualify it.
+
+Only the exact parameterless, single-return default constructor is consumed.
+Superclass method calls require `this` as their first non-spread argument and
+a static method name. Lexical arrows share the method's `super`; ordinary
+nested functions and classes do not. Remaining superclass captures, references
+to the removed inner constructor binding, custom constructor bodies, `.apply`
+method calls and dynamic method names retain the wrapper. This is not general
+superclass recovery. Real TypeScript 5.9.3 and Terser 5.51.2 outputs are checked
+in under `tests/fixtures/tslib-inheritance/`. The compressed variants use the
+same module-mode Terser settings as the matrix. If compression lifts the
+helper's `extendStatics` factory into a sequence, the TypeScript helper collector
+checks both function bodies and the resolved factory call, then applies the
+same module-wide private-local proof as the import-star factory. An external
+reference, initialized/redeclared/lexical local, extra prefix effect, `eval`,
+or `with` prevents recognition. Cleanup consumes the sequence only through
+that proven helper identity.
+
+A retained helper call must also survive the later `UnPrototypeClass` pass.
+An unknown interleaved call receiving the constructor blocks prototype-method
+folding for hoisted functions as well as variable-initialized functions. This
+prevents a leftover `__extends(Child, Parent)` from trying to replace a native
+class's non-writable `prototype`. Existing recovery across property-only calls
+such as `Object.defineProperty(Child.prototype, ...)` remains unchanged.
+
 ### Private-field backing-map lifetime
 
 `UnClassFields` promotes a backing WeakMap only when one class owns it and

@@ -49,6 +49,16 @@ pub(super) fn collect_ts_helpers(
                         collect_ts_helper_from_var_decl(decl, tslib_namespaces, unresolved_mark)
                     {
                         helpers.insert(key, helper);
+                    } else if let Some(key) =
+                        detect_ts_extends_sequence(module, decl, unresolved_mark)
+                    {
+                        helpers.insert(
+                            key,
+                            TsHelperInfo {
+                                kind: TsHelperKind::Extends,
+                                source: TsHelperSource::Inline,
+                            },
+                        );
                     }
                 }
             }
@@ -446,14 +456,105 @@ pub(super) fn detect_ts_import_star_sequence(
     {
         return None;
     }
+    ts_factory_local_is_private(module, &key, &own_keys, unresolved_mark).then_some(key)
+}
+
+// Like the import-star factory above, module-mode Terser can lift __extends'
+// extendStatics local. Both functions and the module-wide ownership proof are
+// required; the `this.__extends` marker alone does not identify a helper.
+fn detect_ts_extends_sequence(
+    module: &Module,
+    decl: &VarDeclarator,
+    unresolved_mark: Option<Mark>,
+) -> Option<BindingKey> {
+    let key = var_declarator_binding_key(decl)?;
+    let ("__extends", fallback) = ts_inline_helper_parts(decl.init.as_deref()?)? else {
+        return None;
+    };
+    let Expr::Seq(sequence) = strip_parens(fallback) else {
+        return None;
+    };
+    let [initialize, callable] = sequence.exprs.as_slice() else {
+        return None;
+    };
+    let Expr::Assign(assign) = strip_parens(initialize) else {
+        return None;
+    };
+    if assign.op != AssignOp::Assign {
+        return None;
+    }
+    let AssignTarget::Simple(SimpleAssignTarget::Ident(binding)) = &assign.left else {
+        return None;
+    };
+    let Expr::Fn(factory) = strip_parens(&assign.right) else {
+        return None;
+    };
+    let Expr::Fn(helper) = strip_parens(callable) else {
+        return None;
+    };
+    if factory.function.is_async
+        || factory.function.is_generator
+        || helper.function.is_async
+        || helper.function.is_generator
+        || factory.function.params.len() != 2
+        || helper.function.params.len() != 2
+    {
+        return None;
+    }
+    let factory_signals = collect_ts_helper_body_signals(&factory.function.body.as_ref()?.stmts);
+    let helper_signals = collect_ts_helper_body_signals(&helper.function.body.as_ref()?.stmts);
+    if !factory_signals.object_set_prototype_of
+        || !factory_signals.proto_prop
+        || !factory_signals.has_own_property
+        || !helper_signals.prototype_prop
+        || !helper_signals.type_error
+    {
+        return None;
+    }
+    let local = binding_key(&binding.id);
+    // The returned helper must actually call the lifted factory with its two
+    // parameters; a marker plus unrelated prototype code is not sufficient.
+    let [first, second] = helper.function.params.as_slice() else {
+        return None;
+    };
+    let (Pat::Ident(first), Pat::Ident(second)) = (&first.pat, &second.pat) else {
+        return None;
+    };
+    let calls_local = helper.function.body.as_ref()?.stmts.iter().any(|stmt| {
+        let Stmt::Expr(statement) = stmt else { return false; };
+        let Expr::Call(call) = strip_parens(&statement.expr) else { return false; };
+        call.args.len() == 2 && call.args.iter().all(|arg| arg.spread.is_none())
+            && matches!(&call.callee, Callee::Expr(callee) if matches!(strip_parens(callee), Expr::Ident(id) if binding_key(id) == local))
+            && matches!(strip_parens(&call.args[0].expr), Expr::Ident(id) if id.to_id() == first.id.to_id())
+            && matches!(strip_parens(&call.args[1].expr), Expr::Ident(id) if id.to_id() == second.id.to_id())
+    });
+    if !calls_local {
+        return None;
+    }
+    ts_factory_local_is_private(module, &key, &local, unresolved_mark).then_some(key)
+}
+
+fn ts_factory_local_is_private(
+    module: &Module,
+    key: &BindingKey,
+    local: &BindingKey,
+    unresolved_mark: Option<Mark>,
+) -> bool {
+    // The reference scan below skips declarators by binding identity. Count
+    // declarations throughout the module first, including hoisted `var` inside
+    // blocks, so a second initializer cannot hide in that skipped set.
+    let uses = crate::analysis::binding_uses::BindingUseIndex::collect_module_items(&module.body);
+    if !uses.has_single_declaration(key) || !uses.has_single_declaration(local) {
+        return false;
+    }
     let mut declarations = 0;
     for item in &module.body {
         if let ModuleItem::Stmt(Stmt::Decl(Decl::Var(var))) = item {
             for candidate in &var.decls {
-                if var_declarator_binding_key(candidate).as_ref() == Some(&own_keys) {
+                if var_declarator_binding_key(candidate).as_ref() == Some(local) {
                     if var.kind != swc_core::ecma::ast::VarDeclKind::Var || candidate.init.is_some()
                     {
-                        return None;
+                        return false;
                     }
                     declarations += 1;
                 }
@@ -461,7 +562,7 @@ pub(super) fn detect_ts_import_star_sequence(
         }
     }
     if declarations != 1 {
-        return None;
+        return false;
     }
     struct DynamicLookup {
         unresolved_mark: Option<Mark>,
@@ -485,14 +586,14 @@ pub(super) fn detect_ts_import_star_sequence(
     };
     module.visit_with(&mut dynamic);
     if dynamic.found {
-        return None;
+        return false;
     }
     let remaining = super::remaining_refs_outside_var_declarators(
         module,
-        &HashSet::from([own_keys.clone()]),
-        &HashSet::from([key.clone(), own_keys]),
+        &HashSet::from([local.clone()]),
+        &HashSet::from([key.clone(), local.clone()]),
     );
-    remaining.is_empty().then_some(key)
+    remaining.is_empty()
 }
 
 fn ts_inline_helper_kind(expr: &Expr) -> Option<TsHelperKind> {

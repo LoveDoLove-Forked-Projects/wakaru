@@ -980,3 +980,57 @@ fn swc_async_namespace_identity_is_separate_from_the_callable_export() {
         }
     });
 }
+
+#[test]
+fn lifted_extends_factory_requires_private_local_and_matching_callable() {
+    use crate::rules::SimplifySequence;
+    use swc_core::ecma::transforms::base::resolver;
+    use swc_core::ecma::visit::VisitMutWith;
+
+    let source =
+        include_str!("../../../tests/fixtures/tslib-inheritance/commonjs-inline-compressed.js");
+    let has_helper = |source: &str| {
+        GLOBALS.set(&Globals::new(), || {
+            let mut module = parse_module(source);
+            let unresolved = Mark::new();
+            let top = Mark::new();
+            module.visit_mut_with(&mut resolver(unresolved, top, false));
+            module.visit_mut_with(&mut SimplifySequence::new(unresolved));
+            !LocalHelperContext::collect_with_mark(&module, unresolved)
+                .ts_helpers_of_kind(TsHelperKind::Extends)
+                .is_empty()
+        })
+    };
+    assert!(has_helper(source));
+    for source in [
+        format!("{source}\nconsume(extendStatics);"),
+        format!("{source}\nextendStatics = custom;"),
+        format!("{source}\nfunction observe() {{ return extendStatics; }}"),
+        format!("{source}\nvar extendStatics;"),
+        format!("{source}\nif (flag) {{ var extendStatics = custom; }}"),
+        format!("{source}\nif (flag) {{ var __extends = custom; }}"),
+        format!("{source}\neval(code);"),
+        format!("{source}\nwith(scope) {{ observe(); }}"),
+        source.replace(",extendStatics;", ",extendStatics = custom;"),
+        source.replace(",extendStatics;", "; let extendStatics;"),
+        source.replace(
+            "extendStatics=function(d,b)",
+            "extendStatics=async function(d,b)",
+        ),
+        source.replace(
+            "extendStatics(d,b),d.prototype",
+            "extendStatics(b,d),d.prototype",
+        ),
+        source.replace("extendStatics(d,b),d.prototype", "custom(d,b),d.prototype"),
+        source.replace(
+            "extendStatics(d,b),d.prototype",
+            "extendStatics(d,...b),d.prototype",
+        ),
+        source.replace("||(", "||(observe(),"),
+    ] {
+        assert!(
+            !has_helper(&source),
+            "must retain unproven factory: {source}"
+        );
+    }
+}

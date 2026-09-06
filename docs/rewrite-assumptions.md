@@ -401,6 +401,53 @@ Affects: `UnEs6Class` direct `Object.defineProperty` accessor recovery.
 Level: `standard` and above. `minimal` requires attributes exactly representable
 by class syntax.
 
+### `native_class_inheritance`
+
+The program does not depend on the inheritance-emulation details introduced
+by downlevel compilation.
+
+For a proven TypeScript default derived constructor, `standard` prioritizes
+recovering the native class source over preserving every behavior of the ES5
+inheritance emulation. TypeScript 5.9.3 emits this constructor even when the
+source has no explicit constructor:
+
+```js
+function Child() {
+  return base !== null && base.apply(this, arguments) || this;
+}
+```
+
+Recovering `class Child extends Parent { ... }` removes this constructor and
+uses native construction. It also recovers proven instance/static superclass
+method calls as `super.method(...)`. These changes are intentionally observable:
+
+- With `Parent = null`, the lowered constructor can return `this`; the native
+  default derived constructor throws when instantiated.
+- With a native class as `Parent`, `.apply` throws, whereas native construction
+  can succeed. Built-in constructors can also behave differently.
+- Overriding a parent's `.apply` or a method's `.call` affects the lowered code,
+  but native construction and `super.method(...)` bypass those properties.
+- Replacing `Parent.prototype` after the child is defined affects the lowered
+  `base.prototype.method` lookup. Native `super` follows the child method's
+  home object's prototype instead. Mutating that prototype chain can expose
+  the opposite difference.
+
+This is a source-recovery assumption, not evidence that the runtime parent is
+an ordinary function or that the two programs are execution-equivalent. The
+usual function-to-class changes (including requiring `new`, strict methods and
+non-enumerable methods) also apply. Recognition remains bounded to the compiler
+frame and stable helper bindings; this does not authorize deleting arbitrary
+null guards or rewriting captured superclass references.
+
+Affects: `UnEs6Class` recovery of the TypeScript default derived constructor
+and its instance/static superclass method calls. See
+[helper detection](helper-detection.md#typescript-default-inheritance) for
+recognition and rejection boundaries.
+
+Level: `standard` and above. `minimal` preserves this lowered constructor and
+wrapper. Other existing class recoveries have their own boundaries; this is
+not a claim that `minimal` preserves every lowered class.
+
 ### `import_hoisting_eagerness`
 
 Converting a CommonJS `require()` into an ESM `import` moves the provider's
