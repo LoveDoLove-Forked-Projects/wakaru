@@ -1270,7 +1270,7 @@ use(head, second);
 
 #[test]
 fn pipeline_keeps_reassigned_inline_sliced_helper_with_default_pattern() {
-    let input = include_str!("fixtures/reassigned-sliced-default.js");
+    let input = include_str!("fixtures/reassigned-sliced-default/input.js");
     let output = render_pipeline_until_with_level(input, "UnDestructuring", RewriteLevel::Standard);
     assert!(output.contains("= _slicedToArray(items, 2)"), "{output}");
 }
