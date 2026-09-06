@@ -1413,3 +1413,53 @@ fn async_bootstrap_is_not_unwrapped_into_module_evaluation() {
     );
     assert!(raw.modules[0].1.contains("async"));
 }
+
+#[test]
+fn trailing_iife_unwraps_after_unused_empty_anchor_regardless_of_name() {
+    use wakaru_core::driver::test_support::unpack_raw;
+    for name in ["__webpack_exports__", "r"] {
+        let source = bundle_with_startup(&format!(
+            "var {name} = {{}}; (() => {{ consume(requireModule(1)); }})();"
+        ));
+        let raw = unpack_raw(&source, &DecompileOptions::default()).unwrap();
+        let normal = expect_unpack(&source, "bundle.js");
+        for entry in [entry_of(&raw.modules), entry_of(&normal)] {
+            assert!(entry.contains("./module-1.js"), "{entry}");
+            assert!(
+                !entry.contains("=>"),
+                "dead anchor must not prevent unwrapping: {entry}"
+            );
+        }
+    }
+}
+
+#[test]
+fn trailing_iife_preserves_referenced_ordinary_empty_anchor() {
+    use wakaru_core::driver::test_support::unpack_raw;
+    for name in ["app", "r"] {
+        let source = bundle_with_startup(&format!(
+            "var {name} = {{}}; (() => {{ {name}.value = requireModule(1); consume({name}); }})();"
+        ));
+        let raw = unpack_raw(&source, &DecompileOptions::default()).unwrap();
+        let normal = expect_unpack(&source, "bundle.js");
+        for entry in [entry_of(&raw.modules), entry_of(&normal)] {
+            assert!(
+                entry.contains(&format!("{name} = {{}}")),
+                "live anchor must survive: {entry}"
+            );
+            assert!(entry.contains("./module-1.js"), "{entry}");
+        }
+    }
+}
+
+#[test]
+fn trailing_async_iife_keeps_boundary_after_unused_mangled_anchor() {
+    use wakaru_core::driver::test_support::unpack_raw;
+    let source =
+        bundle_with_startup("var r = {}; (async () => { await consume(requireModule(1)); })();");
+    let raw = unpack_raw(&source, &DecompileOptions::default()).unwrap();
+    let normal = expect_unpack(&source, "bundle.js");
+    for entry in [entry_of(&raw.modules), entry_of(&normal)] {
+        assert!(entry.contains("async"), "{entry}");
+    }
+}

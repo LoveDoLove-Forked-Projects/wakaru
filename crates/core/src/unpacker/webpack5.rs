@@ -1918,7 +1918,9 @@ fn extract_trailing_entry_body(
         [stmt] => stmt,
         [anchor, stmt]
             if empty_object_anchor(anchor).is_some_and(|(binding, var)| {
-                binding == "__webpack_exports__" && var.decls.len() == 1
+                var.decls.len() == 1
+                    && (binding == "__webpack_exports__"
+                        || !stmts_reference_ident(std::slice::from_ref(stmt), &binding))
             }) =>
         {
             stmt
