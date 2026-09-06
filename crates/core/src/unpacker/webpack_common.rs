@@ -117,6 +117,20 @@ impl FactoryRuntimeParameter {
     }
 }
 
+struct RebindLocalizedParameter {
+    name: Atom,
+    from: SyntaxContext,
+    to: SyntaxContext,
+}
+
+impl VisitMut for RebindLocalizedParameter {
+    fn visit_mut_ident(&mut self, ident: &mut Ident) {
+        if ident.sym == self.name && ident.ctxt == self.from {
+            ident.ctxt = self.to;
+        }
+    }
+}
+
 pub(super) struct ReusedRuntimeParameter {
     pub(super) kind: FactoryRuntimeParameter,
     pub(super) source: Atom,
@@ -408,13 +422,23 @@ pub(super) fn localize_reused_runtime_parameter(
         &mut candidate,
         &[BindingRename {
             old: target.clone(),
-            new: local_name,
+            new: local_name.clone(),
         }],
     );
     let remaining = BindingUseIndex::collect(&candidate);
     if remaining.use_count(target) != 0 || remaining.has_declaration(target) {
         return false;
     }
+    // The parameter references resolved as the synthetic module's unresolved
+    // binding, and the rename keeps that context. The localized `var` is a
+    // real module-local binding, so give it the same non-unresolved context
+    // the other synthetic locals use; rules that classify identifiers by
+    // `unresolved_mark` must not read it as an undeclared global.
+    candidate.visit_mut_with(&mut RebindLocalizedParameter {
+        name: local_name,
+        from: target.1,
+        to: SyntaxContext::empty(),
+    });
 
     *module = candidate;
     true
