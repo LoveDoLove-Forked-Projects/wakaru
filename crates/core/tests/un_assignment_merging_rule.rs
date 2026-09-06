@@ -183,15 +183,11 @@ module.exports = fn;
 }
 
 #[test]
-fn splits_module_exports_property_chain() {
+fn keeps_module_exports_property_chain_with_intermediate_member_read() {
     let input = r#"
 module.exports.foo = module.exports.bar = 1;
 "#;
-    let expected = r#"
-module.exports.bar = 1;
-module.exports.foo = 1;
-"#;
-    assert_eq_normalized(&apply(input), expected);
+    assert_eq_normalized(&apply(input), input);
 }
 
 #[test]
@@ -344,6 +340,28 @@ object[k()] = object.b = 1;
 fn keeps_chain_for_call_receivers() {
     let input = r#"
 f().x = g().y = 1;
+"#;
+    assert_eq_normalized(&apply(input), input);
+}
+
+#[test]
+fn nested_export_target_keeps_receiver_before_inner_write() {
+    let input = r#"
+exports.box = {};
+const saved = exports.box;
+exports.box.flag = exports.box = 1;
+console.log(saved.flag);
+"#;
+    assert_eq_normalized(&apply(input), input);
+}
+
+#[test]
+fn nested_computed_export_target_keeps_receiver_before_inner_write() {
+    let input = r#"
+module.exports = {};
+const saved = module.exports;
+module["exports"]["flag"] = module.exports = 1;
+console.log(saved.flag);
 "#;
     assert_eq_normalized(&apply(input), input);
 }

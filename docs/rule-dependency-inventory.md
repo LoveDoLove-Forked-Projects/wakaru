@@ -167,8 +167,10 @@ rationale, or level gating appear.
   Splitting also moves each target's reference evaluation next to its write,
   so a target is accepted only when that evaluation can neither throw nor
   change between the writes: a plain identifier, or a member rooted at the
-  CommonJS wrapper bindings `module`, `exports`, `require` (`module.exports.x`
-  included), with identifier, private-name, or string/number literal keys.
+  CommonJS wrapper bindings `module`, `exports`, `require`, with identifier,
+  private-name, or string/number literal keys. Receivers containing another
+  member read (`module.exports.x`, `exports.box.flag`) keep the chain: an inner
+  write may replace the intermediate object even with ordinary data properties.
   Everything else keeps the chain at every level: a local root may be in TDZ
   (`root.x = inner = 1; let root = {}` throws before `inner` is written) or be
   reassigned by an inner setter, `this` throws before `super()` in a derived

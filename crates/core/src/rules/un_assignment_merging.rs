@@ -23,8 +23,10 @@ use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 ///   violation throws at the write, whose order is preserved);
 /// - a member rooted at the CommonJS wrapper bindings `module`, `exports`, or
 ///   `require`, which the wrapper always defines (`exports.foo = exports.bar
-///   = 1`, `module.exports = exports = fn`, `module.exports.a =
-///   module.exports.b = 1`).
+///   = 1`, `module.exports = exports = fn`).
+///   A receiver containing another member read (`module.exports.a`) is not
+///   accepted: an inner write may replace that intermediate object, even when
+///   every property is an ordinary data property.
 ///
 /// Keys must be identifiers, private names, or string/number literals. Any
 /// other target keeps the chain: a local root may be in TDZ or be reassigned
@@ -227,12 +229,6 @@ fn member_has_stable_root(member: &MemberExpr, unresolved_ctxt: SyntaxContext) -
     match member.obj.as_ref() {
         Expr::Ident(root) => {
             root.ctxt == unresolved_ctxt && is_commonjs_scope_binding(root.sym.as_ref())
-        }
-        // `module.exports.x`: the intermediate read is a data property of the
-        // wrapper's module object.
-        Expr::Member(inner) => {
-            member_has_stable_root(inner, unresolved_ctxt)
-                && matches!(inner.obj.as_ref(), Expr::Ident(_))
         }
         _ => false,
     }
