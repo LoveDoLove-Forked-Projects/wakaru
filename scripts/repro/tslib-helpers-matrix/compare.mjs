@@ -9,14 +9,61 @@ function tsApi() {
   return typescript;
 }
 
+// The shared identifier normalizer handles ordinary bindings, not #names.
+// Use lexical class scopes, including references captured by nested classes.
+// A nested class's heritage expression is evaluated in its outer private scope.
+function canonicalizePrivateNames(ts, file) {
+  let nextName = 0;
+  let invalid = false;
+  const scopes = [];
+  const transformed = ts.transform(file, [(context) => {
+    function visit(node) {
+      if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+        const scope = new Map();
+        for (const member of node.members) {
+          if (member.name && ts.isPrivateIdentifier(member.name) && !scope.has(member.name.text)) {
+            scope.set(member.name.text, `#__private${nextName++}`);
+          }
+        }
+        scopes.push(scope);
+        const result = ts.visitEachChild(node, (child) => {
+          if (!ts.isHeritageClause(child)) return visit(child);
+          scopes.pop();
+          const heritage = visit(child);
+          scopes.push(scope);
+          return heritage;
+        }, context);
+        scopes.pop();
+        return result;
+      }
+      if (ts.isPrivateIdentifier(node)) {
+        for (let i = scopes.length - 1; i >= 0; i--) {
+          const name = scopes[i].get(node.text);
+          if (name) return ts.factory.createPrivateIdentifier(name);
+        }
+        // Do not turn an unbound private name into a generated binding.
+        invalid = true;
+        return node;
+      }
+      return ts.visitEachChild(node, visit, context);
+    }
+    return visit;
+  }]);
+  const result = transformed.transformed[0];
+  transformed.dispose();
+  return invalid ? null : result;
+}
+
 // Compare the complete recovered module, not just the presence of async/class
-// syntax. Canonicalize only export spelling/placement. A CJS round trip can
+// syntax. Canonicalize private bindings and export spelling/placement. A CJS round trip can
 // emit `function f() {}; export { f }` instead of `export function f() {}`.
 // Keep local export targets distinct from their public names for alpha-renaming.
 function moduleParts(code) {
   const ts = tsApi();
-  const file = ts.createSourceFile("module.js", code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-  if (file.parseDiagnostics.length) return null;
+  const parsed = ts.createSourceFile("module.js", code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  if (parsed.parseDiagnostics.length) return null;
+  const file = canonicalizePrivateNames(ts, parsed);
+  if (!file) return null;
   const printer = ts.createPrinter();
   const body = [], exports = [], tslib = [];
   for (let statement of file.statements) {

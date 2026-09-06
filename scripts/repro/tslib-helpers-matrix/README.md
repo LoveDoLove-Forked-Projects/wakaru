@@ -47,6 +47,12 @@ names, other imports, declarations, expressions, and side effects still need
 to match. It accepts destructuring moved into a parameter via explicit alternate
 forms; it does not accept unrecovered indexing as equivalent destructuring.
 
+Private names are alpha-normalized by their lexical class binding. The
+adapter tracks nested classes, outer private references, and heritage
+expressions separately; public method/property names and the choice of private
+binding at each access remain significant. This allows mangled backing-map
+names to recover as `#r` without requiring the original spelling `#x`.
+
 The compiler-injected tslib import declarations from recovered output are
 included in the expected module as well. This allows unused helper imports
 that Wakaru preserves after recovery. It does **not** strip helper calls or
@@ -59,11 +65,9 @@ runtime compatibility. The script-only execution harness cannot run these
 modules; no `execute` check is claimed. The matrix does not install or execute
 tslib itself. Runtime behavior tests remain separate from this recovery score.
 
-The current baseline has **94 yes / 20 no / 0 errors across 114 distinct
+The current baseline has **97 yes / 17 no / 0 errors across 114 distinct
 shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
 
-- Mangled private names are not yet alpha-normalized by this comparison
-  adapter; the helper calls recover but those three rows still compare unequal.
 - Compressed array-destructuring cases retain iterator helpers.
 - Inheritance recovery retains its IIFE when members still capture the
   superclass parameter; full superclass recovery remains incomplete.

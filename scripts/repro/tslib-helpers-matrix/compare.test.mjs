@@ -47,3 +47,22 @@ test("module comparison does not normalize away a provider import mismatch", () 
   assert.ok(matches('import p from "./provider.js"; function r() { return p(); } export { r as run };', snippet));
   assert.equal(matches('import p from "./wrong.js"; export function run() { return p(); }', snippet), false);
 });
+
+test("private names compare by class binding while public properties remain exact", () => {
+  const snippet = { source: "export class Foo { #x = 1; #y = 2; read() { return this.#x - this.#y; } }" };
+  assert.ok(matches("export class Foo { #a = 1; #b = 2; read() { return this.#a - this.#b; } }", snippet));
+  assert.equal(matches("export class Foo { #a = 1; #b = 2; read() { return this.#b - this.#a; } }", snippet), false);
+  assert.equal(matches("export class Foo { #a = 1; #b = 2; wrong() { return this.#a - this.#b; } }", snippet), false);
+});
+
+test("private-name comparison respects nested scopes and heritage evaluation", () => {
+  const snippet = { source: "export class Outer { #x = 1; inner() { return class extends base(this.#x) { #y = 2; read(o) { return o.#x + this.#y; } }; } }" };
+  assert.ok(matches("export class Outer { #a = 1; inner() { return class extends base(this.#a) { #b = 2; read(o) { return o.#a + this.#b; } }; } }", snippet));
+  assert.equal(matches("export class Outer { #a = 1; inner() { return class extends base(this.#a) { #a = 2; read(o) { return o.#a + this.#a; } }; } }", snippet), false);
+});
+
+test("private-name comparison preserves brand checks and rejects unbound names", () => {
+  const snippet = { source: "export class Foo { #x; has(o) { return #x in o; } }" };
+  assert.ok(matches("export class Foo { #r; has(o) { return #r in o; } }", snippet));
+  assert.equal(matches("export class Foo { #r; has(o) { return #__private0 in o; } }", snippet), false);
+});
