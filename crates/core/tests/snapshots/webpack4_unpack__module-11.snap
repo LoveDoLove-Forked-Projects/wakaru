@@ -205,14 +205,14 @@ export function bindActionCreators(e, t) {
     }
     return r;
 }
-export function compose(...t) {
-    if (t.length === 0) {
+export function compose(...t_1) {
+    if (t_1.length === 0) {
         return (e)=>e;
     }
-    if (t.length === 1) {
-        return t[0];
+    if (t_1.length === 1) {
+        return t_1[0];
     }
-    return t.reduce((e, t)=>function() {
+    return t_1.reduce((e, t)=>function() {
             return e(t(...arguments));
         });
 }

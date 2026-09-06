@@ -55,8 +55,8 @@ HashRouter.propTypes = {
 };
 const x = (e)=>!!(e.metaKey || e.altKey || e.ctrlKey || e.shiftKey);
 export class Link extends Component {
-    constructor(...i){
-        super(...i);
+    constructor(...i_1){
+        super(...i_1);
         this.handleClick = (e)=>{
             if (r.props.onClick) {
                 r.props.onClick(e);
