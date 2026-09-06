@@ -413,21 +413,23 @@ fn find_candidates(stmts: &[Option<&Stmt>], allow_module_var: bool) -> Vec<Class
         // assignment. An unrecognized helper call involving the constructor
         // may replace its prototype (for example `tm.inherit(Child, Base)`), so
         // preserve the original ordering. Ordinary reads and `new Child()` are
-        // safe and are intentionally not blocked.
-        let has_interleaved_constructor_call = *constructor_kind
-            == ConstructorKind::VariableFunction
-            && candidate
-                .consumed_indices
-                .iter()
-                .copied()
-                .max()
-                .is_some_and(|last_consumed| {
-                    ((*fn_idx + 1)..last_consumed).any(|i| {
-                        !candidate.consumed_indices.contains(&i)
-                            && get_stmt(i)
-                                .is_some_and(|stmt| is_call_referencing_binding(stmt, binding))
-                    })
-                });
+        // safe and are intentionally not blocked. Hoisted function declarations
+        // need the same protection as variable-initialized constructors.
+        let has_interleaved_constructor_call = candidate
+            .consumed_indices
+            .iter()
+            .copied()
+            .max()
+            .is_some_and(|last_consumed| {
+                ((*fn_idx + 1)..last_consumed).any(|i| {
+                    !candidate.consumed_indices.contains(&i)
+                        && get_stmt(i).is_some_and(|stmt| {
+                            is_call_referencing_binding(stmt, binding)
+                                && (*constructor_kind == ConstructorKind::VariableFunction
+                                    || call_receives_constructor(stmt, binding))
+                        })
+                })
+            });
         if has_interleaved_constructor_call {
             continue;
         }
@@ -462,6 +464,21 @@ fn find_candidates(stmts: &[Option<&Stmt>], allow_module_var: bool) -> Vec<Class
     }
 
     candidates
+}
+
+// Passing the constructor itself lets an unknown helper replace its prototype.
+// For hoisted declarations, keep the existing recovery across calls that only
+// receive a property such as Object.defineProperty(Foo.prototype, ...).
+fn call_receives_constructor(stmt: &Stmt, binding: &BindingKey) -> bool {
+    let Stmt::Expr(statement) = stmt else {
+        return false;
+    };
+    let Expr::Call(call) = strip_parens(&statement.expr) else {
+        return false;
+    };
+    call.args.iter().any(
+        |arg| matches!(strip_parens(&arg.expr), Expr::Ident(id) if binding_key(id) == *binding),
+    )
 }
 
 fn is_call_referencing_binding(stmt: &Stmt, binding: &BindingKey) -> bool {

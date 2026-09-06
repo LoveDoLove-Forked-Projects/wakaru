@@ -1089,3 +1089,24 @@ mod1.exports = Foo;
 "#;
     assert_eq_normalized(&apply(input), expected);
 }
+
+#[test]
+fn hoisted_constructor_preserves_unrecognized_interleaved_inheritance() {
+    // Terser moves the hoisted constructor before TypeScript's helper call.
+    // A native class has a non-writable prototype, so leaving this call after
+    // class recovery can throw instead of establishing the inheritance chain.
+    for setup in [
+        "__extends(Child, Parent);",
+        "ts.__extends(Child, Parent);",
+        "runtime.attachBase(Child, Parent);",
+    ] {
+        let input = format!(
+            r#"
+function Child() {{ return Parent.apply(this, arguments) || this; }}
+{setup}
+Child.prototype.run = function() {{ return this.value; }};
+"#
+        );
+        assert_eq_normalized(&apply_resolved(&input), &input);
+    }
+}
