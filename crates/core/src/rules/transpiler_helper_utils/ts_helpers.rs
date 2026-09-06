@@ -247,6 +247,8 @@ fn ts_helper_name_kind(name: &str) -> Option<TsHelperKind> {
         "__spread" => Some(TsHelperKind::Spread),
         "__spreadArrays" => Some(TsHelperKind::SpreadArrays),
         "__spreadArray" => Some(TsHelperKind::SpreadArray),
+        "__classPrivateFieldGet" => Some(TsHelperKind::ClassPrivateFieldGet),
+        "__classPrivateFieldSet" => Some(TsHelperKind::ClassPrivateFieldSet),
         _ => None,
     }
 }
@@ -477,7 +479,9 @@ fn ts_inline_helper_fallback_matches(expr: &Expr, kind: TsHelperKind) -> bool {
         TsHelperKind::Spread => signals.arguments_ref && signals.concat_call,
         TsHelperKind::SpreadArrays => signals.arguments_ref && signals.array_constructor,
         TsHelperKind::SpreadArray => signals.concat_call,
-        TsHelperKind::ClassPrivateFieldGet | TsHelperKind::ClassPrivateFieldSet => false,
+        TsHelperKind::ClassPrivateFieldGet | TsHelperKind::ClassPrivateFieldSet => {
+            expr_contains_tsc_private_helper_fn(expr, kind)
+        }
     }
 }
 fn ts_helper_callable_body(expr: &Expr) -> Option<(usize, &[Stmt])> {

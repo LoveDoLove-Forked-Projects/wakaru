@@ -667,3 +667,102 @@ fn private_backing_map_allows_local_export_between_class_and_initializer() {
     assert!(output.contains("#x = 1"), "{output}");
     assert!(!output.contains("WeakMap"), "{output}");
 }
+
+fn apply_class_fields(input: &str) -> String {
+    common::render_rule(input, |mark| {
+        wakaru_core::rules::UnClassFields::new_with_mark(
+            mark,
+            wakaru_core::rules::RewriteLevel::Standard,
+        )
+    })
+}
+
+#[test]
+fn tslib_private_fields_match_proven_helper_delivery() {
+    for (prefix, get, set) in [
+        ("var ts = require('tslib');", "ts.__classPrivateFieldGet", "ts.__classPrivateFieldSet"),
+        ("import * as ts from 'tslib';", "ts.__classPrivateFieldGet", "ts.__classPrivateFieldSet"),
+        ("import {__classPrivateFieldGet as g, __classPrivateFieldSet as s} from 'tslib';", "g", "s"),
+        ("var g = require('tslib').__classPrivateFieldGet, s = require('tslib').__classPrivateFieldSet;", "g", "s"),
+        ("", "require('tslib').__classPrivateFieldGet", "require('tslib').__classPrivateFieldSet"),
+        ("var g = this && this.__classPrivateFieldGet || function(receiver, state) { return state.get(receiver); }; var s = this && this.__classPrivateFieldSet || function(receiver, state, value) { return state.set(receiver, value); };", "g", "s"),
+    ] {
+        let input = format!("{prefix} var _Foo_x; class Foo {{ constructor() {{ _Foo_x.set(this, 1); }} getX() {{ return {get}(this, _Foo_x, 'f'); }} setX(value) {{ {set}(this, _Foo_x, value, 'f'); }} }} _Foo_x = new WeakMap();");
+        let output = apply_class_fields(&input);
+        assert!(output.contains("#x = 1"), "{output}");
+        assert!(output.contains("return this.#x"), "{output}");
+        assert!(output.contains("this.#x = value"), "{output}");
+        assert!(!output.contains("WeakMap"), "{output}");
+    }
+}
+
+#[test]
+fn tslib_private_fields_keep_unsupported_calls_and_helper_writes() {
+    for (prefix, params, call, suffix) in [
+        (
+            "var ts = require('custom');",
+            "",
+            "ts.__classPrivateFieldGet(this, _Foo_x, 'f')",
+            "",
+        ),
+        (
+            "var ts = require('tslib');",
+            "ts",
+            "ts.__classPrivateFieldGet(this, _Foo_x, 'f')",
+            "",
+        ),
+        (
+            "var ts = require('tslib');",
+            "other",
+            "ts.__classPrivateFieldGet(other, _Foo_x, 'f')",
+            "",
+        ),
+        (
+            "var ts = require('tslib');",
+            "",
+            "ts.__classPrivateFieldGet(this, _Foo_x, 'a')",
+            "",
+        ),
+        (
+            "var ts = require('tslib');",
+            "",
+            "ts.__classPrivateFieldGet(this, _Foo_x, ...['f'])",
+            "",
+        ),
+        (
+            "var ts = require('tslib');",
+            "",
+            "ts.__classPrivateFieldGet(this, _Foo_x, 'f')",
+            "ts = custom;",
+        ),
+        (
+            "var ts = require('tslib');",
+            "",
+            "ts.__classPrivateFieldGet(this, _Foo_x, 'f')",
+            "ts.__classPrivateFieldGet = custom;",
+        ),
+        (
+            "var g = require('tslib').__classPrivateFieldGet;",
+            "",
+            "g(this, _Foo_x, 'f')",
+            "g = custom;",
+        ),
+        (
+            "var ts = require('tslib');",
+            "",
+            "ts.__classPrivateFieldGet(this, _Foo_x, 'f')",
+            "use(_Foo_x);",
+        ),
+        (
+            "function require(name) { return custom; }",
+            "",
+            "require('tslib').__classPrivateFieldGet(this, _Foo_x, 'f')",
+            "",
+        ),
+    ] {
+        let input = format!("{prefix} var _Foo_x; class Foo {{ constructor() {{ _Foo_x.set(this, 1); }} getX({params}) {{ return {call}; }} }} _Foo_x = new WeakMap(); {suffix}");
+        let output = apply_class_fields(&input);
+        assert!(!output.contains("#x"), "{output}");
+        assert!(output.contains("_Foo_x.set(this, 1)"), "{output}");
+    }
+}

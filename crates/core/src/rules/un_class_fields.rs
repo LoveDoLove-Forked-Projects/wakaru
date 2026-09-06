@@ -12,7 +12,8 @@ use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 use super::helper_matcher::binding_key;
 use super::transpiler_helper_utils::{
-    BindingKey, LocalHelperContext, TranspilerHelperKind, TsHelperKind,
+    tslib_member_ts_helper_kind, tslib_require_ts_helper_kind, BindingKey, LocalHelperContext,
+    TranspilerHelperKind, TsHelperKind,
 };
 use super::RewriteLevel;
 
@@ -43,10 +44,101 @@ pub struct UnClassFields {
     unresolved_mark: Mark,
     define_property_helpers: HashSet<BindingKey>,
     private_maps: HashMap<BindingKey, Atom>,
-    private_get_helpers: HashSet<BindingKey>,
-    private_set_helpers: HashSet<BindingKey>,
+    private_get_helpers: PrivateHelperCallees,
+    private_set_helpers: PrivateHelperCallees,
     private_single_owner_maps: HashSet<BindingKey>,
     consumed_private_maps: HashSet<BindingKey>,
+}
+
+// Keep raw TypeScript helper identity separate from field ownership proof.
+struct PrivateHelperCallees {
+    bindings: HashSet<BindingKey>,
+    namespaces: HashSet<BindingKey>,
+    kind: TsHelperKind,
+    unresolved_mark: Mark,
+    dynamic_lookup: bool,
+}
+impl PrivateHelperCallees {
+    fn empty(kind: TsHelperKind, unresolved_mark: Mark) -> Self {
+        Self {
+            bindings: HashSet::new(),
+            namespaces: HashSet::new(),
+            kind,
+            unresolved_mark,
+            dynamic_lookup: false,
+        }
+    }
+    fn collect(
+        module: &Module,
+        helpers: &LocalHelperContext,
+        kind: TsHelperKind,
+        unresolved_mark: Mark,
+    ) -> Self {
+        let mut written =
+            crate::analysis::binding_uses::BindingUseIndex::collect_direct_write_bindings(module);
+        struct Hazards<'a> {
+            written: &'a mut HashSet<BindingKey>,
+            dynamic_lookup: bool,
+        }
+        impl Visit for Hazards<'_> {
+            fn visit_with_stmt(&mut self, _: &swc_core::ecma::ast::WithStmt) {
+                self.dynamic_lookup = true;
+            }
+            fn visit_assign_expr(&mut self, assign: &AssignExpr) {
+                if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &assign.left {
+                    if let Expr::Ident(id) = member.obj.as_ref() {
+                        self.written.insert(binding_key(id));
+                    }
+                }
+                assign.visit_children_with(self);
+            }
+            fn visit_update_expr(&mut self, update: &swc_core::ecma::ast::UpdateExpr) {
+                if let Expr::Member(member) = update.arg.as_ref() {
+                    if let Expr::Ident(id) = member.obj.as_ref() {
+                        self.written.insert(binding_key(id));
+                    }
+                }
+                update.visit_children_with(self);
+            }
+        }
+        let mut hazards = Hazards {
+            written: &mut written,
+            dynamic_lookup: false,
+        };
+        module.visit_with(&mut hazards);
+        let dynamic_lookup = hazards.dynamic_lookup;
+        Self {
+            bindings: helpers
+                .ts_helpers_of_kind(kind)
+                .into_iter()
+                .filter(|key| !written.contains(key))
+                .collect(),
+            namespaces: helpers
+                .tslib_namespaces()
+                .iter()
+                .filter(|key| !written.contains(*key))
+                .cloned()
+                .collect(),
+            kind,
+            unresolved_mark,
+            dynamic_lookup,
+        }
+    }
+    fn iter(&self) -> impl Iterator<Item = &BindingKey> {
+        self.bindings.iter()
+    }
+    fn matches(&self, expr: &Expr) -> bool {
+        if self.dynamic_lookup {
+            return false;
+        }
+        let expr = crate::utils::paren::strip_parens(expr);
+        if let Expr::Ident(id) = expr {
+            return self.bindings.contains(&binding_key(id));
+        }
+        tslib_member_ts_helper_kind(expr, &self.namespaces)
+            .or_else(|| tslib_require_ts_helper_kind(expr, Some(self.unresolved_mark)))
+            == Some(self.kind)
+    }
 }
 
 impl UnClassFields {
@@ -60,8 +152,14 @@ impl UnClassFields {
             unresolved_mark,
             define_property_helpers: HashSet::new(),
             private_maps: HashMap::new(),
-            private_get_helpers: HashSet::new(),
-            private_set_helpers: HashSet::new(),
+            private_get_helpers: PrivateHelperCallees::empty(
+                TsHelperKind::ClassPrivateFieldGet,
+                unresolved_mark,
+            ),
+            private_set_helpers: PrivateHelperCallees::empty(
+                TsHelperKind::ClassPrivateFieldSet,
+                unresolved_mark,
+            ),
             private_single_owner_maps: HashSet::new(),
             consumed_private_maps: HashSet::new(),
         }
@@ -81,11 +179,21 @@ impl UnClassFields {
         let previous_private_maps = std::mem::replace(&mut self.private_maps, private_maps);
         let previous_private_get_helpers = std::mem::replace(
             &mut self.private_get_helpers,
-            local_helpers.ts_helpers_of_kind(TsHelperKind::ClassPrivateFieldGet),
+            PrivateHelperCallees::collect(
+                module,
+                local_helpers,
+                TsHelperKind::ClassPrivateFieldGet,
+                self.unresolved_mark,
+            ),
         );
         let previous_private_set_helpers = std::mem::replace(
             &mut self.private_set_helpers,
-            local_helpers.ts_helpers_of_kind(TsHelperKind::ClassPrivateFieldSet),
+            PrivateHelperCallees::collect(
+                module,
+                local_helpers,
+                TsHelperKind::ClassPrivateFieldSet,
+                self.unresolved_mark,
+            ),
         );
         let previous_private_single_owner_maps = std::mem::replace(
             &mut self.private_single_owner_maps,
@@ -117,7 +225,7 @@ impl UnClassFields {
         let private_helpers: HashSet<BindingKey> = self
             .private_get_helpers
             .iter()
-            .chain(&self.private_set_helpers)
+            .chain(self.private_set_helpers.iter())
             .cloned()
             .collect();
         if !private_helpers.is_empty() {
@@ -799,13 +907,13 @@ fn remove_private_helper_declarations(module: &mut Module, removable: &HashSet<B
 fn class_has_unsupported_private_map_refs(
     class: &Class,
     map_key: &BindingKey,
-    get_helpers: &HashSet<BindingKey>,
-    set_helpers: &HashSet<BindingKey>,
+    get_helpers: &PrivateHelperCallees,
+    set_helpers: &PrivateHelperCallees,
 ) -> bool {
     struct UnsupportedRefFinder<'a> {
         map_key: &'a BindingKey,
-        get_helpers: &'a HashSet<BindingKey>,
-        set_helpers: &'a HashSet<BindingKey>,
+        get_helpers: &'a PrivateHelperCallees,
+        set_helpers: &'a PrivateHelperCallees,
         found: bool,
     }
 
@@ -863,11 +971,7 @@ fn class_has_unsupported_private_map_refs(
             let Callee::Expr(callee) = &call.callee else {
                 return None;
             };
-            let Expr::Ident(callee_ident) = callee.as_ref() else {
-                return None;
-            };
-            let callee_key = binding_key(callee_ident);
-            if self.get_helpers.contains(&callee_key) {
+            if self.get_helpers.matches(callee) {
                 let [ExprOrSpread { expr: receiver, .. }, ExprOrSpread { expr: map, .. }, ExprOrSpread { expr: kind, .. }] =
                     call.args.as_slice()
                 else {
@@ -880,7 +984,7 @@ fn class_has_unsupported_private_map_refs(
                     return Some(None);
                 }
             }
-            if self.set_helpers.contains(&callee_key) {
+            if self.set_helpers.matches(callee) {
                 let [ExprOrSpread { expr: receiver, .. }, ExprOrSpread { expr: map, .. }, ExprOrSpread { expr: _value, .. }, ExprOrSpread { expr: kind, .. }] =
                     call.args.as_slice()
                 else {
@@ -915,8 +1019,8 @@ fn promote_private_field_initializers(
     class: &mut Class,
     private_maps: &HashMap<BindingKey, Atom>,
     single_owner_maps: &HashSet<BindingKey>,
-    get_helpers: &HashSet<BindingKey>,
-    set_helpers: &HashSet<BindingKey>,
+    get_helpers: &PrivateHelperCallees,
+    set_helpers: &PrivateHelperCallees,
 ) -> HashSet<BindingKey> {
     let Some(ctor_index) = class
         .body
@@ -1040,8 +1144,8 @@ fn rewrite_private_field_accesses(
     class: &mut Class,
     promoted_maps: &HashSet<BindingKey>,
     private_maps: &HashMap<BindingKey, Atom>,
-    get_helpers: &HashSet<BindingKey>,
-    set_helpers: &HashSet<BindingKey>,
+    get_helpers: &PrivateHelperCallees,
+    set_helpers: &PrivateHelperCallees,
 ) {
     class.visit_mut_with(&mut PrivateFieldAccessRewriter {
         promoted_maps,
@@ -1054,8 +1158,8 @@ fn rewrite_private_field_accesses(
 struct PrivateFieldAccessRewriter<'a> {
     promoted_maps: &'a HashSet<BindingKey>,
     private_maps: &'a HashMap<BindingKey, Atom>,
-    get_helpers: &'a HashSet<BindingKey>,
-    set_helpers: &'a HashSet<BindingKey>,
+    get_helpers: &'a PrivateHelperCallees,
+    set_helpers: &'a PrivateHelperCallees,
 }
 
 impl VisitMut for PrivateFieldAccessRewriter<'_> {
@@ -1091,11 +1195,7 @@ impl PrivateFieldAccessRewriter<'_> {
         let Callee::Expr(callee) = &call.callee else {
             return None;
         };
-        let Expr::Ident(callee_ident) = callee.as_ref() else {
-            return None;
-        };
-        let callee_key = binding_key(callee_ident);
-        if self.get_helpers.contains(&callee_key) {
+        if self.get_helpers.matches(callee) {
             let [ExprOrSpread { expr: receiver, .. }, ExprOrSpread { expr: map, .. }, ExprOrSpread { expr: kind, .. }] =
                 call.args.as_slice()
             else {
@@ -1107,7 +1207,7 @@ impl PrivateFieldAccessRewriter<'_> {
             let private_name = self.private_name_for_map(map)?;
             return Some((private_name, None));
         }
-        if self.set_helpers.contains(&callee_key) {
+        if self.set_helpers.matches(callee) {
             let [ExprOrSpread { expr: receiver, .. }, ExprOrSpread { expr: map, .. }, ExprOrSpread { expr: value, .. }, ExprOrSpread { expr: kind, .. }] =
                 call.args.as_slice()
             else {

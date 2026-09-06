@@ -59,10 +59,11 @@ runtime compatibility. The script-only execution harness cannot run these
 modules; no `execute` check is claimed. The matrix does not install or execute
 tslib itself. Runtime behavior tests remain separate from this recovery score.
 
-The current baseline has **90 yes / 24 no / 0 errors across 114 distinct
+The current baseline has **94 yes / 20 no / 0 errors across 114 distinct
 shapes**. The `no` rows are intentional recorded gaps, not skipped tests:
 
-- External private-field helpers remain; mangled inline helpers also remain.
+- Mangled private names are not yet alpha-normalized by this comparison
+  adapter; the helper calls recover but those three rows still compare unequal.
 - Compressed array-destructuring cases retain iterator helpers.
 - Inheritance recovery retains its IIFE when members still capture the
   superclass parameter; full superclass recovery remains incomplete.

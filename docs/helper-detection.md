@@ -283,6 +283,11 @@ executable statements may not. Earlier construction, later resets (including
 comma expressions), escaping maps, and unsupported map uses keep the lowered
 form. These are proof requirements, not rewrite assumptions.
 
+Get/set calls accept resolver-proven tslib named aliases, namespaces, direct
+`require("tslib")` members, and inline marker/body matches. The consumer still
+requires `this`, field mode `"f"`, exact arity, and no spread arguments. Written
+helper bindings or namespaces and dynamic `with` lookup prevent promotion.
+
 ### Tagged template body shapes
 
 `taggedTemplateLiteral` detection uses signal-based matching on a 2-param
